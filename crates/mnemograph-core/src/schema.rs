@@ -14,6 +14,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
             include_str!("../migrations/0004-titles-aliases-types.sql"),
             fill_title_keys_and_links,
         ),
+        M::up(include_str!("../migrations/0005-notes.sql")),
     ])
 }
 
