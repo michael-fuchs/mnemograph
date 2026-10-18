@@ -18,7 +18,7 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
 | `--page-types` | `MNEMOGRAPH_PAGE_TYPES` | `project,technology,decision,person,tool,concept` |
 
-`cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`.
+`cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`. `cargo run -- delete page <title>` and `cargo run -- delete note <id>` permanently delete a page (with its revisions and aliases; links to it become stubs) or a note, after confirmation (`--yes` skips it). Agents cannot delete anything. These commands need exclusive access, so stop `serve` first.
 
 There is no authentication yet, so the server refuses to listen on anything but a loopback address.
 
