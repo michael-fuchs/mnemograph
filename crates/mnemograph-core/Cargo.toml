@@ -10,7 +10,9 @@ repository.workspace = true
 comrak = { version = "0.56.0", default-features = false }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
+tantivy = "0.27"
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["backup"] }

@@ -3,3 +3,4 @@ Scratch.md
 *.db
 *.db-shm
 *.db-wal
+*.db.search/

@@ -34,6 +34,12 @@ enum Command {
         )]
         page_types: Vec<String>,
     },
+    /// Rebuild the search index from the database.
+    Reindex {
+        /// Path of the SQLite database.
+        #[arg(long, env = "MNEMOGRAPH_DB", default_value = "mnemograph.db")]
+        db: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -50,7 +56,17 @@ async fn main() -> anyhow::Result<()> {
             listen,
             page_types,
         } => serve(db, listen, page_types).await,
+        Command::Reindex { db } => reindex(db),
     }
+}
+
+fn reindex(db: PathBuf) -> anyhow::Result<()> {
+    anyhow::ensure!(db.exists(), "database {} does not exist", db.display());
+    let knowledge =
+        Knowledge::open(&db).with_context(|| format!("opening database {}", db.display()))?;
+    knowledge.rebuild_search_index()?;
+    tracing::info!(db = %db.display(), "search index rebuilt");
+    Ok(())
 }
 
 async fn serve(db: PathBuf, listen: SocketAddr, page_types: Vec<String>) -> anyhow::Result<()> {

@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use mnemograph_core::{Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related};
+use mnemograph_core::{
+    Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related, SearchHit,
+};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -14,7 +16,7 @@ use serde::{Deserialize, Serialize};
 const INSTRUCTIONS: &str = "mnemograph is a long-term memory shared between agents and its owner. \
 Knowledge is organized in pages, each about one subject and identified by its title. \
 Titles are case-insensitive, and a page can have aliases that lead to it. \
-Use read_page to look up what is already known about a subject before writing, and write_page to record new pages. \
+Use search to find what is already known (it understands German and English word forms) and read_page to read a subject before writing; and write_page to record new pages. \
 Use add_note for short, timestamped records such as decisions, findings or events; link the pages they concern with [[Title]]. \
 Notes are append-only and appear on the pages they link to.";
 
@@ -22,6 +24,8 @@ Notes are append-only and appear on the pages they link to.";
 const RECENT_NOTES: u32 = 10;
 /// How many entries related returns at most.
 const RELATED_LIMIT: u32 = 50;
+/// Default and maximum number of search hits.
+const SEARCH_LIMIT: (i64, i64) = (10, 50);
 
 /// The MCP server; one instance is created per request.
 #[derive(Clone)]
@@ -145,6 +149,59 @@ pub struct AddNoteArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchArgs {
+    /// Words to search for. Matches German and English word forms ("Datenbanken" finds
+    /// "Datenbank", "databases" finds "database"). Use "quotes" for phrases.
+    pub query: String,
+    /// Only search pages of this page type (notes are then excluded).
+    #[serde(default)]
+    pub page_type: Option<String>,
+    /// Maximum number of hits, 1 to 50. Defaults to 10.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Search results, best match first.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SearchView {
+    pub hits: Vec<HitView>,
+}
+
+/// A page or note that matched a search.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum HitView {
+    Page {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        page_type: Option<String>,
+        /// The matching part of the page, with matched words in **bold**.
+        snippet: String,
+    },
+    Note {
+        note: NoteView,
+        /// The matching part of the note, with matched words in **bold**.
+        snippet: String,
+    },
+}
+
+impl From<SearchHit> for HitView {
+    fn from(hit: SearchHit) -> Self {
+        match hit.found {
+            Found::Page { title, page_type } => HitView::Page {
+                title,
+                page_type,
+                snippet: hit.snippet,
+            },
+            Found::Note(note) => HitView::Note {
+                note: note.into(),
+                snippet: hit.snippet,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RelatedArgs {
     /// Title or alias of the page or stub to start from.
     pub title: String,
@@ -254,6 +311,28 @@ impl McpServer {
             }
             None => Err(stub_message(&title, &links.backlinks, &notes)),
         }
+    }
+
+    #[tool(
+        description = "Search pages and notes by full text, best matches first. Use it before writing to find existing pages on a subject."
+    )]
+    async fn search(
+        &self,
+        Parameters(args): Parameters<SearchArgs>,
+    ) -> Result<rmcp::Json<SearchView>, String> {
+        let knowledge = self.knowledge.clone();
+        let limit = args
+            .limit
+            .unwrap_or(SEARCH_LIMIT.0)
+            .clamp(1, SEARCH_LIMIT.1) as usize;
+        let page_type = args.page_type.filter(|t| !t.trim().is_empty());
+        blocking(move || knowledge.search(&args.query, page_type.as_deref(), limit))
+            .await
+            .map(|hits| {
+                rmcp::Json(SearchView {
+                    hits: hits.into_iter().map(HitView::from).collect(),
+                })
+            })
     }
 
     #[tool(

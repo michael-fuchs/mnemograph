@@ -15,6 +15,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
             fill_title_keys_and_links,
         ),
         M::up(include_str!("../migrations/0005-notes.sql")),
+        M::up(include_str!("../migrations/0006-change-counter.sql")),
     ])
 }
 
