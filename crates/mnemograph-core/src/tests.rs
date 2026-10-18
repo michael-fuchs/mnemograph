@@ -674,3 +674,121 @@ fn notes_are_not_backlinks() {
     knowledge.add_note("[[Rust]]").unwrap();
     assert!(knowledge.links("Rust").unwrap().backlinks.is_empty());
 }
+
+// Related pages
+
+fn related(knowledge: &Knowledge, title: &str, hops: u32) -> Vec<(String, u32, bool)> {
+    let mut found: Vec<_> = knowledge
+        .related(title, hops, 100)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.title, r.distance, r.stub))
+        .collect();
+    found.sort();
+    found
+}
+
+fn r(title: &str, distance: u32, stub: bool) -> (String, u32, bool) {
+    (title.to_owned(), distance, stub)
+}
+
+#[test]
+fn related_follows_links_in_both_directions_up_to_the_hop_count() {
+    let knowledge = knowledge();
+    // A → B → C → D, and E → A
+    create(&knowledge, "A", "[[B]]");
+    create(&knowledge, "B", "[[C]]");
+    create(&knowledge, "C", "[[D]]");
+    create(&knowledge, "D", "");
+    create(&knowledge, "E", "[[A]]");
+
+    assert_eq!(
+        related(&knowledge, "A", 1),
+        [r("B", 1, false), r("E", 1, false)]
+    );
+    assert_eq!(
+        related(&knowledge, "A", 3),
+        [
+            r("B", 1, false),
+            r("C", 2, false),
+            r("D", 3, false),
+            r("E", 1, false)
+        ]
+    );
+}
+
+#[test]
+fn related_reports_the_shortest_distance_in_cycles() {
+    let knowledge = knowledge();
+    create(&knowledge, "A", "[[B]] [[C]]");
+    create(&knowledge, "B", "[[C]] [[A]]");
+    create(&knowledge, "C", "[[A]]");
+    assert_eq!(
+        related(&knowledge, "A", 3),
+        [r("B", 1, false), r("C", 1, false)]
+    );
+}
+
+#[test]
+fn related_resolves_aliases_and_includes_stubs() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rust",
+            "",
+            None,
+            PageChanges {
+                aliases: Some(vec!["rustlang".into()]),
+                page_type: Some(Some("technology".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    create(&knowledge, "mnemograph", "[[rustlang]] and [[Tantivy]]");
+    create(&knowledge, "Ferris", "[[RUST]]");
+
+    assert_eq!(
+        related(&knowledge, "rustlang", 2),
+        [
+            r("Ferris", 1, false),
+            r("Tantivy", 2, true),
+            r("mnemograph", 1, false)
+        ]
+    );
+    let rust = &knowledge.related("mnemograph", 1, 100).unwrap()[0];
+    assert_eq!(rust.page_type.as_deref(), Some("technology"));
+}
+
+#[test]
+fn related_works_from_a_stub_but_not_from_an_unknown_title() {
+    let knowledge = knowledge();
+    create(&knowledge, "A", "[[Caddy]]");
+    create(&knowledge, "B", "[[A]]");
+    assert_eq!(
+        related(&knowledge, "caddy", 2),
+        [r("A", 1, false), r("B", 2, false)]
+    );
+    assert!(matches!(
+        knowledge.related("Nothing", 2, 100),
+        Err(Error::PageNotFound(_))
+    ));
+}
+
+#[test]
+fn related_clamps_hops_and_respects_the_limit() {
+    let knowledge = knowledge();
+    create(&knowledge, "A", "[[B]]");
+    create(&knowledge, "B", "[[C]]");
+    create(&knowledge, "C", "[[D]]");
+    create(&knowledge, "D", "[[E]]");
+    assert_eq!(related(&knowledge, "A", 0).len(), 1);
+    assert_eq!(related(&knowledge, "A", 99).len(), 3);
+    assert_eq!(knowledge.related("A", 3, 2).unwrap().len(), 2);
+}
+
+#[test]
+fn a_page_without_links_has_no_related_pages() {
+    let knowledge = knowledge();
+    create(&knowledge, "Alone", "");
+    assert!(knowledge.related("Alone", 3, 100).unwrap().is_empty());
+}
