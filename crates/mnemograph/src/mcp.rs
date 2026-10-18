@@ -29,6 +29,8 @@ pub struct PageView {
     pub title: String,
     /// Markdown body.
     pub body: String,
+    /// Current revision number; pass it as `base_revision` when changing the page.
+    pub revision: u32,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -38,6 +40,7 @@ impl From<Page> for PageView {
         Self {
             title: page.title,
             body: page.body,
+            revision: page.revision,
             created_at: page.created_at,
             updated_at: page.updated_at,
         }
@@ -48,8 +51,12 @@ impl From<Page> for PageView {
 pub struct WritePageArgs {
     /// Title of the page: the name of its subject, e.g. "Rauthy". Must not contain [ ] | or line breaks.
     pub title: String,
-    /// Markdown body of the page.
+    /// The complete new Markdown body of the page (not a diff).
     pub body: String,
+    /// Required to change an existing page: the revision your new body is based on, as returned
+    /// by read_page. Omit it only to create a new page.
+    #[serde(default)]
+    pub base_revision: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -67,13 +74,15 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Create a new page. Fails if a page with this title already exists.")]
+    #[tool(
+        description = "Create a page, or change an existing one by sending its complete new body together with the revision it is based on. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision as base_revision."
+    )]
     async fn write_page(
         &self,
         Parameters(args): Parameters<WritePageArgs>,
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
-        blocking(move || knowledge.create_page(&args.title, &args.body))
+        blocking(move || knowledge.write_page(&args.title, &args.body, args.base_revision))
             .await
             .map(|page| rmcp::Json(page.into()))
     }
@@ -104,13 +113,29 @@ impl ServerHandler for McpServer {
     }
 }
 
+/// Turns a domain error into a message the agent can act on.
+fn agent_message(err: mnemograph_core::Error) -> String {
+    match err {
+        mnemograph_core::Error::Conflict { ref current, .. } => {
+            let current = serde_json::to_string(&PageView::from((**current).clone()))
+                .expect("PageView serializes");
+            format!("{err}. Current revision: {current}")
+        }
+        mnemograph_core::Error::Storage(_) | mnemograph_core::Error::Migration(_) => {
+            tracing::error!(%err, "knowledge operation failed");
+            "internal error".to_owned()
+        }
+        _ => err.to_string(),
+    }
+}
+
 /// Runs a synchronous [`Knowledge`] call on the blocking thread pool and turns domain errors
 /// into messages for the agent.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> mnemograph_core::Result<T> + Send + 'static,
 ) -> Result<T, String> {
     match tokio::task::spawn_blocking(f).await {
-        Ok(result) => result.map_err(|err| err.to_string()),
+        Ok(result) => result.map_err(agent_message),
         Err(join_error) => {
             tracing::error!(%join_error, "knowledge task failed");
             Err("internal error".to_owned())

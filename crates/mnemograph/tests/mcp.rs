@@ -125,7 +125,7 @@ async fn reading_a_missing_page_is_a_tool_error() {
 }
 
 #[tokio::test]
-async fn writing_an_existing_title_is_a_tool_error() {
+async fn writing_an_existing_title_without_base_is_a_conflict() {
     let server = TestServer::start().await;
     server
         .call("write_page", json!({ "title": "Rust", "body": "one" }))
@@ -133,5 +133,57 @@ async fn writing_an_existing_title_is_a_tool_error() {
     let result = server
         .call("write_page", json!({ "title": "Rust", "body": "two" }))
         .await;
-    assert!(error_text(&result).contains("already exists"));
+    let error = error_text(&result);
+    assert!(error.contains("already exists"), "{error}");
+    assert!(
+        error.contains("one"),
+        "error must contain the current body: {error}"
+    );
+}
+
+#[tokio::test]
+async fn agent_updates_a_page_with_its_base_revision() {
+    let server = TestServer::start().await;
+    server
+        .call("write_page", json!({ "title": "Caddy", "body": "v1" }))
+        .await;
+    let read = server.call("read_page", json!({ "title": "Caddy" })).await;
+    assert_eq!(structured(&read)["revision"], 1);
+
+    let updated = server
+        .call(
+            "write_page",
+            json!({ "title": "Caddy", "body": "v2", "base_revision": 1 }),
+        )
+        .await;
+    assert_eq!(structured(&updated)["revision"], 2);
+    let read = server.call("read_page", json!({ "title": "Caddy" })).await;
+    assert_eq!(structured(&read)["body"], "v2");
+}
+
+#[tokio::test]
+async fn stale_base_revision_is_rejected_with_the_current_revision() {
+    let server = TestServer::start().await;
+    server
+        .call("write_page", json!({ "title": "Caddy", "body": "v1" }))
+        .await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Caddy", "body": "v2 by agent A", "base_revision": 1 }),
+        )
+        .await;
+
+    let result = server
+        .call(
+            "write_page",
+            json!({ "title": "Caddy", "body": "v2 by agent B", "base_revision": 1 }),
+        )
+        .await;
+    let error = error_text(&result);
+    assert!(error.contains("current revision is 2"), "{error}");
+    assert!(error.contains("v2 by agent A"), "{error}");
+
+    let read = server.call("read_page", json!({ "title": "Caddy" })).await;
+    assert_eq!(structured(&read)["body"], "v2 by agent A");
 }
