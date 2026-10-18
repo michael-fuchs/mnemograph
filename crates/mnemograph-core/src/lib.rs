@@ -4,6 +4,7 @@
 //! source of truth (ADR 0003). The API is synchronous; async callers should run it on a
 //! blocking thread.
 
+mod delete;
 mod export;
 mod links;
 mod notes;
@@ -17,6 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub use delete::DeletedPage;
 pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{MAX_HOPS, Related};
@@ -42,6 +44,8 @@ pub enum Error {
     InvalidTitle(String),
     #[error("no page titled {0:?}")]
     PageNotFound(String),
+    #[error("no note with ID {0}")]
+    NoteNotFound(i64),
     /// The write did not name the page's current revision as its base. The caller should merge
     /// its change into `current` and retry with `current.revision` as the base.
     #[error("{}", conflict_message(.base, .current))]
@@ -63,6 +67,10 @@ pub enum Error {
     Storage(#[from] rusqlite::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] rusqlite_migration::Error),
+    #[error(
+        "the search index {0} is in use by another process; is `mnemograph serve` running on this database?"
+    )]
+    IndexInUse(String),
     #[error("search index error: {0}")]
     Search(#[from] tantivy::TantivyError),
 }
@@ -169,10 +177,14 @@ impl Knowledge {
         let path = path.as_ref();
         let mut index_dir = path.as_os_str().to_owned();
         index_dir.push(".search");
-        Self::init(
-            Connection::open(path)?,
-            SearchIndex::open(Path::new(&index_dir))?,
-        )
+        let index_dir = Path::new(&index_dir);
+        let search = SearchIndex::open(index_dir).map_err(|err| match err {
+            tantivy::TantivyError::LockFailure(..) => {
+                Error::IndexInUse(index_dir.display().to_string())
+            }
+            err => err.into(),
+        })?;
+        Self::init(Connection::open(path)?, search)
     }
 
     /// Opens a fresh in-memory database, mainly for tests.

@@ -1032,3 +1032,104 @@ fn export_refuses_a_non_empty_directory() {
         "mine"
     );
 }
+
+// Deletion
+
+#[test]
+fn deleting_a_page_removes_it_and_its_title_becomes_a_stub() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Traefik",
+            "A proxy with [[Docker]] labels.",
+            None,
+            PageChanges {
+                aliases: Some(vec!["traefik proxy".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    update(&knowledge, "Traefik", "Second revision.", 1).unwrap();
+    create(&knowledge, "Proxies", "[[Traefik]] or [[Traefik proxy]]");
+    let note = knowledge.add_note("Evaluated [[Traefik]].").unwrap();
+
+    let deleted = knowledge.delete_page("traefik proxy").unwrap();
+    assert_eq!(
+        deleted,
+        DeletedPage {
+            title: "Traefik".into(),
+            aliases: vec!["traefik proxy".into()],
+            revisions: 2
+        }
+    );
+
+    assert_eq!(knowledge.page("Traefik").unwrap(), None);
+    assert_eq!(knowledge.page_revision("Traefik", 1).unwrap(), None);
+    assert!(
+        knowledge
+            .links("Proxies")
+            .unwrap()
+            .outgoing
+            .iter()
+            .all(LinkTarget::is_stub)
+    );
+    assert_eq!(knowledge.links("Traefik").unwrap().backlinks, ["Proxies"]);
+    assert_eq!(knowledge.notes_about("Traefik", 10).unwrap()[0].id, note.id);
+    assert!(knowledge.links("Docker").unwrap().backlinks.is_empty());
+    assert!(search(&knowledge, "labels").is_empty());
+}
+
+#[test]
+fn a_deleted_title_can_be_written_again_from_scratch() {
+    let knowledge = knowledge();
+    create(&knowledge, "Traefik", "old");
+    update(&knowledge, "Traefik", "older", 1).unwrap();
+    knowledge.delete_page("Traefik").unwrap();
+    assert_eq!(create(&knowledge, "Traefik", "new").revision, 1);
+}
+
+#[test]
+fn deleting_a_note_removes_only_that_note() {
+    let knowledge = knowledge();
+    create(&knowledge, "Rust", "");
+    let first = knowledge
+        .add_note("First about [[Rust]], unusualword.")
+        .unwrap();
+    let second = knowledge.add_note("Second about [[Rust]].").unwrap();
+
+    knowledge.delete_note(first.id).unwrap();
+    let remaining: Vec<_> = knowledge
+        .notes_about("Rust", 10)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(remaining, [second.id]);
+    assert!(search(&knowledge, "unusualword").is_empty());
+    assert!(knowledge.page("Rust").unwrap().is_some());
+}
+
+#[test]
+fn deleting_something_missing_is_an_error() {
+    let knowledge = knowledge();
+    assert!(matches!(
+        knowledge.delete_page("Nothing"),
+        Err(Error::PageNotFound(_))
+    ));
+    assert!(matches!(
+        knowledge.delete_note(42),
+        Err(Error::NoteNotFound(42))
+    ));
+}
+
+#[test]
+fn deletions_survive_reopening_without_reindexing_stale_hits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb.db");
+    {
+        let knowledge = Knowledge::open(&path).unwrap();
+        create(&knowledge, "Gone", "vanishing content");
+        knowledge.delete_page("Gone").unwrap();
+    }
+    assert!(search(&Knowledge::open(&path).unwrap(), "vanishing").is_empty());
+}
