@@ -1,0 +1,40 @@
+# mnemograph
+
+A lean, self-hosted knowledge base that is both a human-readable wiki and a long-term memory for AI agents, shipped as a single Rust binary.
+
+**Status:** early development. The plan is in [`docs/plans/mnemograph-v1.md`](docs/plans/mnemograph-v1.md), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md) and design decisions in [`docs/adr/`](docs/adr/).
+
+## Running locally
+
+```sh
+cargo run -- serve
+```
+
+This creates `mnemograph.db` in the current directory and listens on `http://127.0.0.1:8080`. Options (also settable via environment):
+
+| Option     | Environment         | Default          |
+| ---------- | ------------------- | ---------------- |
+| `--db`     | `MNEMOGRAPH_DB`     | `mnemograph.db`  |
+| `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
+
+There is no authentication yet, so the server refuses to listen on anything but a loopback address.
+
+## Connecting Claude Code
+
+```sh
+claude mcp add --transport http mnemograph http://localhost:8080/mcp
+```
+
+Claude Code then has the tools `write_page` (create a page from a title and a Markdown body) and `read_page` (read a page by title).
+
+## Development
+
+```sh
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+## License
+
+[MIT](LICENSE)
