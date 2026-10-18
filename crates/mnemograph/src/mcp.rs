@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mnemograph_core::{Knowledge, LinkTarget, Links, Note, Page, PageChanges};
+use mnemograph_core::{Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -20,6 +20,8 @@ Notes are append-only and appear on the pages they link to.";
 
 /// How many recent notes read_page returns.
 const RECENT_NOTES: u32 = 10;
+/// How many entries related returns at most.
+const RELATED_LIMIT: u32 = 50;
 
 /// The MCP server; one instance is created per request.
 #[derive(Clone)]
@@ -40,7 +42,7 @@ pub struct PageView {
     /// Markdown body.
     pub body: String,
     /// Current revision number; pass it as `base_revision` when changing the page.
-    pub revision: u32,
+    pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
     /// Titles this page links to, in order of appearance.
@@ -101,7 +103,7 @@ impl PageView {
             page_type: page.page_type,
             aliases: page.aliases,
             body: page.body,
-            revision: page.revision,
+            revision: page.revision.into(),
             created_at: page.created_at,
             updated_at: page.updated_at,
             links: links.outgoing.into_iter().map(LinkView::from).collect(),
@@ -122,7 +124,7 @@ pub struct WritePageArgs {
     /// Required to change an existing page: the revision your new body is based on, as returned
     /// by read_page. Omit it only to create a new page.
     #[serde(default)]
-    pub base_revision: Option<u32>,
+    pub base_revision: Option<i64>,
     /// Renames the page. The old title stays an alias, so existing links keep working.
     #[serde(default)]
     pub new_title: Option<String>,
@@ -140,6 +142,45 @@ pub struct AddNoteArgs {
     /// The note in Markdown: what happened or was decided, and why. Link the pages it concerns
     /// with [[Title]]; titles without a page yet are fine.
     pub body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RelatedArgs {
+    /// Title or alias of the page or stub to start from.
+    pub title: String,
+    /// How many links away to look, 1 to 3. Defaults to 2.
+    #[serde(default)]
+    pub hops: Option<i64>,
+}
+
+/// The neighborhood of a page in the link graph.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RelatedView {
+    /// Pages and stubs near the starting point, nearest first.
+    pub related: Vec<RelatedEntry>,
+}
+
+/// A page or stub near another one.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RelatedEntry {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_type: Option<String>,
+    /// True if no page has this title yet.
+    pub stub: bool,
+    /// Number of links between the two, following links in either direction.
+    pub distance: i64,
+}
+
+impl From<Related> for RelatedEntry {
+    fn from(related: Related) -> Self {
+        Self {
+            title: related.title,
+            page_type: related.page_type,
+            stub: related.stub,
+            distance: related.distance.into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -164,6 +205,10 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<WritePageArgs>,
     ) -> Result<rmcp::Json<PageView>, String> {
+        let base_revision = args
+            .base_revision
+            .map(|base| u32::try_from(base).map_err(|_| format!("invalid base_revision {base}")))
+            .transpose()?;
         let knowledge = self.knowledge.clone();
         blocking(move || {
             let changes = PageChanges {
@@ -173,8 +218,7 @@ impl McpServer {
                     .map(|t| Some(t).filter(|t| !t.trim().is_empty())),
                 aliases: args.aliases,
             };
-            let page =
-                knowledge.write_page(&args.title, &args.body, args.base_revision, changes)?;
+            let page = knowledge.write_page(&args.title, &args.body, base_revision, changes)?;
             let links = knowledge.links(&page.title)?;
             let notes = knowledge.notes_about(&page.title, RECENT_NOTES)?;
             Ok(PageView::new(page, links, notes))
@@ -210,6 +254,24 @@ impl McpServer {
             }
             None => Err(stub_message(&title, &links.backlinks, &notes)),
         }
+    }
+
+    #[tool(
+        description = "Find what else is known around a subject: the pages and stubs within a few links of a page, following links in both directions, nearest first."
+    )]
+    async fn related(
+        &self,
+        Parameters(args): Parameters<RelatedArgs>,
+    ) -> Result<rmcp::Json<RelatedView>, String> {
+        let knowledge = self.knowledge.clone();
+        let hops = args.hops.unwrap_or(2).clamp(1, MAX_HOPS.into()) as u32;
+        blocking(move || knowledge.related(&args.title, hops, RELATED_LIMIT))
+            .await
+            .map(|related| {
+                rmcp::Json(RelatedView {
+                    related: related.into_iter().map(RelatedEntry::from).collect(),
+                })
+            })
     }
 
     #[tool(

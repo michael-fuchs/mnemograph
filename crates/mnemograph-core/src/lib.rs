@@ -6,6 +6,7 @@
 
 mod links;
 mod notes;
+mod related;
 mod schema;
 mod title;
 
@@ -15,6 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub use notes::Note;
+pub use related::{MAX_HOPS, Related};
 use title::{clean_title, title_key};
 
 /// Page types allowed when none are configured.

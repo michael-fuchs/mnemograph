@@ -104,7 +104,7 @@ async fn server_lists_its_tools_and_instructions() {
     let tools = server.client.list_all_tools().await.unwrap();
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, ["add_note", "read_page", "write_page"]);
+    assert_eq!(names, ["add_note", "read_page", "related", "write_page"]);
 
     let info = server.client.peer_info().expect("server info");
     assert!(
@@ -387,4 +387,45 @@ async fn empty_note_is_rejected() {
     let server = TestServer::start().await;
     let result = server.call("add_note", json!({ "body": "  " })).await;
     assert!(error_text(&result).contains("must not be empty"));
+}
+
+#[tokio::test]
+async fn related_returns_the_neighborhood_nearest_first() {
+    let server = TestServer::start().await;
+    for (title, body) in [
+        (
+            "mnemograph",
+            "Written in [[Rust]], searches with [[Tantivy]].",
+        ),
+        ("Rust", "See [[Ferris]]."),
+        ("Ferris", "The mascot."),
+    ] {
+        server
+            .call("write_page", json!({ "title": title, "body": body }))
+            .await;
+    }
+
+    let near = server
+        .call("related", json!({ "title": "mnemograph", "hops": 1 }))
+        .await;
+    assert_eq!(
+        structured(&near)["related"],
+        json!([
+            { "title": "Rust", "stub": false, "distance": 1 },
+            { "title": "Tantivy", "stub": true, "distance": 1 }
+        ])
+    );
+
+    let default_hops = server
+        .call("related", json!({ "title": "mnemograph" }))
+        .await;
+    assert_eq!(structured(&default_hops)["related"][2]["title"], "Ferris");
+    assert_eq!(structured(&default_hops)["related"][2]["distance"], 2);
+}
+
+#[tokio::test]
+async fn related_of_an_unknown_title_is_a_tool_error() {
+    let server = TestServer::start().await;
+    let result = server.call("related", json!({ "title": "Nothing" })).await;
+    assert!(error_text(&result).contains("no page titled"));
 }
