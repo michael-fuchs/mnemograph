@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mnemograph_core::{Knowledge, Links, Page};
+use mnemograph_core::{Knowledge, Links, Page, PageChanges};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 const INSTRUCTIONS: &str = "mnemograph is a long-term memory shared between agents and its owner. \
 Knowledge is organized in pages, each about one subject and identified by its title. \
+Titles are case-insensitive, and a page can have aliases that lead to it. \
 Use read_page to look up what is already known about a subject before writing, and write_page to record new pages.";
 
 /// The MCP server; one instance is created per request.
@@ -27,6 +28,10 @@ pub struct McpServer {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PageView {
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_type: Option<String>,
+    /// Alternative titles that lead to this page.
+    pub aliases: Vec<String>,
     /// Markdown body.
     pub body: String,
     /// Current revision number; pass it as `base_revision` when changing the page.
@@ -42,15 +47,21 @@ pub struct PageView {
 /// A link from a page to a title.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LinkView {
+    /// The title as written in the link.
     pub title: String,
-    /// True if no page has this title yet; writing a page with this title fills the stub.
+    /// True if no page has this title or alias yet; writing a page with this title fills the stub.
     pub stub: bool,
+    /// Title of the page the link leads to, if it differs from the link's title (case or alias).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
 }
 
 impl PageView {
     fn new(page: Page, links: Links) -> Self {
         Self {
             title: page.title,
+            page_type: page.page_type,
+            aliases: page.aliases,
             body: page.body,
             revision: page.revision,
             created_at: page.created_at,
@@ -59,8 +70,9 @@ impl PageView {
                 .outgoing
                 .into_iter()
                 .map(|link| LinkView {
+                    stub: link.is_stub(),
+                    page: link.page.filter(|page| *page != link.title),
                     title: link.title,
-                    stub: link.stub,
                 })
                 .collect(),
             backlinks: links.backlinks,
@@ -70,7 +82,8 @@ impl PageView {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WritePageArgs {
-    /// Title of the page: the name of its subject, e.g. "Rauthy". Must not contain [ ] | or line breaks.
+    /// Title or alias of the page: the name of its subject, e.g. "Rauthy". Case-insensitive; must
+    /// not contain [ ] | or line breaks.
     pub title: String,
     /// The complete new Markdown body of the page (not a diff). Link to other pages with
     /// [[Title]] or [[Title|label]].
@@ -79,11 +92,21 @@ pub struct WritePageArgs {
     /// by read_page. Omit it only to create a new page.
     #[serde(default)]
     pub base_revision: Option<u32>,
+    /// Renames the page. The old title stays an alias, so existing links keep working.
+    #[serde(default)]
+    pub new_title: Option<String>,
+    /// Page type, one of the types listed in the server instructions. Omit to keep the current
+    /// type; an empty string removes it.
+    #[serde(default)]
+    pub page_type: Option<String>,
+    /// Replaces all aliases (alternative titles leading to this page). Omit to keep them.
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadPageArgs {
-    /// Title of the page.
+    /// Title or alias of the page (case-insensitive).
     pub title: String,
 }
 
@@ -105,7 +128,15 @@ impl McpServer {
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
         blocking(move || {
-            let page = knowledge.write_page(&args.title, &args.body, args.base_revision)?;
+            let changes = PageChanges {
+                new_title: args.new_title,
+                page_type: args
+                    .page_type
+                    .map(|t| Some(t).filter(|t| !t.trim().is_empty())),
+                aliases: args.aliases,
+            };
+            let page =
+                knowledge.write_page(&args.title, &args.body, args.base_revision, changes)?;
             let links = knowledge.links(&page.title)?;
             Ok(PageView::new(page, links))
         })
@@ -114,7 +145,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Read a page by its title, with the titles it links to and the pages linking to it."
+        description = "Read a page by its title or an alias, with the titles it links to and the pages linking to it."
     )]
     async fn read_page(
         &self,
@@ -143,7 +174,10 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mnemograph", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(format!(
+                "{INSTRUCTIONS} Allowed page types: {}.",
+                self.knowledge.page_types().join(", ")
+            ))
     }
 }
 
@@ -153,6 +187,8 @@ fn agent_message(err: mnemograph_core::Error) -> String {
         mnemograph_core::Error::Conflict { ref current, .. } => {
             let current = serde_json::json!({
                 "title": current.title,
+                "page_type": current.page_type,
+                "aliases": current.aliases,
                 "revision": current.revision,
                 "body": current.body,
             });

@@ -240,3 +240,94 @@ async fn reading_a_stub_names_the_linking_pages_until_it_is_written() {
         json!([{ "title": "Caddy", "stub": false }])
     );
 }
+
+#[tokio::test]
+async fn pages_are_found_by_alias_and_any_case() {
+    let server = TestServer::start().await;
+    let written = server
+        .call(
+            "write_page",
+            json!({ "title": "Rust", "body": "A language.", "page_type": "Technology", "aliases": ["rustlang"] }),
+        )
+        .await;
+    assert_eq!(structured(&written)["page_type"], "technology");
+    assert_eq!(structured(&written)["aliases"], json!(["rustlang"]));
+
+    let read = server
+        .call("read_page", json!({ "title": "RUSTLANG" }))
+        .await;
+    assert_eq!(structured(&read)["title"], "Rust");
+}
+
+#[tokio::test]
+async fn rename_keeps_links_working() {
+    let server = TestServer::start().await;
+    server
+        .call("write_page", json!({ "title": "Rauthy", "body": "IdP" }))
+        .await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Setup", "body": "Uses [[Rauthy]]." }),
+        )
+        .await;
+
+    let renamed = server
+        .call(
+            "write_page",
+            json!({ "title": "Rauthy", "body": "IdP", "base_revision": 1, "new_title": "Rauthy IdP" }),
+        )
+        .await;
+    assert_eq!(structured(&renamed)["title"], "Rauthy IdP");
+    assert_eq!(structured(&renamed)["aliases"], json!(["Rauthy"]));
+    assert_eq!(structured(&renamed)["backlinks"], json!(["Setup"]));
+
+    let setup = server.call("read_page", json!({ "title": "Setup" })).await;
+    assert_eq!(
+        structured(&setup)["links"],
+        json!([{ "title": "Rauthy", "stub": false, "page": "Rauthy IdP" }])
+    );
+}
+
+#[tokio::test]
+async fn unknown_page_type_lists_the_allowed_types() {
+    let server = TestServer::start().await;
+    let result = server
+        .call(
+            "write_page",
+            json!({ "title": "serde", "body": "", "page_type": "crate" }),
+        )
+        .await;
+    let error = error_text(&result);
+    assert!(
+        error.contains("allowed types: project, technology"),
+        "{error}"
+    );
+
+    let info = server.client.peer_info().expect("server info");
+    assert!(
+        info.instructions
+            .as_deref()
+            .unwrap_or("")
+            .contains("Allowed page types: project, technology, decision, person, tool, concept")
+    );
+}
+
+#[tokio::test]
+async fn empty_page_type_removes_the_type() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Rust", "body": "", "page_type": "tool" }),
+        )
+        .await;
+    let updated = server
+        .call(
+            "write_page",
+            json!({ "title": "Rust", "body": "", "base_revision": 1, "page_type": "" }),
+        )
+        .await;
+    assert_eq!(structured(&updated).get("page_type"), None);
+    assert_eq!(structured(&updated)["revision"], 2);
+}
