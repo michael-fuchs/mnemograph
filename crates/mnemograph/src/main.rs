@@ -25,6 +25,14 @@ enum Command {
         /// Address to listen on.
         #[arg(long, env = "MNEMOGRAPH_LISTEN", default_value = "127.0.0.1:8080")]
         listen: SocketAddr,
+        /// Allowed page types, comma-separated.
+        #[arg(
+            long,
+            env = "MNEMOGRAPH_PAGE_TYPES",
+            value_delimiter = ',',
+            default_values_t = mnemograph_core::DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string())
+        )]
+        page_types: Vec<String>,
     },
 }
 
@@ -37,11 +45,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Serve { db, listen } => serve(db, listen).await,
+        Command::Serve {
+            db,
+            listen,
+            page_types,
+        } => serve(db, listen, page_types).await,
     }
 }
 
-async fn serve(db: PathBuf, listen: SocketAddr) -> anyhow::Result<()> {
+async fn serve(db: PathBuf, listen: SocketAddr, page_types: Vec<String>) -> anyhow::Result<()> {
     // There is no authentication yet, so the server must not be reachable from other machines.
     if !listen.ip().is_loopback() {
         bail!(
@@ -49,8 +61,9 @@ async fn serve(db: PathBuf, listen: SocketAddr) -> anyhow::Result<()> {
         );
     }
 
-    let knowledge =
-        Knowledge::open(&db).with_context(|| format!("opening database {}", db.display()))?;
+    let knowledge = Knowledge::open(&db)
+        .with_context(|| format!("opening database {}", db.display()))?
+        .with_page_types(page_types);
     let shutdown = CancellationToken::new();
     let app = mnemograph::app(Arc::new(knowledge), shutdown.child_token());
 

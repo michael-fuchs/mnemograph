@@ -16,6 +16,7 @@ This creates `mnemograph.db` in the current directory and listens on `http://127
 | ---------- | ------------------- | ---------------- |
 | `--db`     | `MNEMOGRAPH_DB`     | `mnemograph.db`  |
 | `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
+| `--page-types` | `MNEMOGRAPH_PAGE_TYPES` | `project,technology,decision,person,tool,concept` |
 
 There is no authentication yet, so the server refuses to listen on anything but a loopback address.
 
@@ -27,8 +28,10 @@ claude mcp add --transport http mnemograph http://localhost:8080/mcp
 
 Claude Code then has these tools:
 
-- `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
-- `read_page`: read a page by title, with its current revision, the titles it links to and the pages linking to it.
+- `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, or a new title (the old title stays an alias). `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
+- `read_page`: read a page by title or alias, with its current revision, the titles it links to and the pages linking to it.
+
+Titles and aliases are compared case-insensitively, with whitespace collapsed.
 
 ## Development
 

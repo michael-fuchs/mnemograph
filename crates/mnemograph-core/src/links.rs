@@ -4,7 +4,8 @@ use comrak::nodes::NodeValue;
 use comrak::{Arena, Options, parse_document};
 
 /// Returns the distinct link targets in `body` (`[[Title]]` or `[[Title|label]]`), in order of
-/// first appearance. Links inside code are not links.
+/// first appearance; targets with the same title key count once. Links inside code are not
+/// links.
 pub(crate) fn link_targets(body: &str) -> Vec<String> {
     let mut options = Options::default();
     options.extension.wikilinks_title_after_pipe = true;
@@ -14,10 +15,12 @@ pub(crate) fn link_targets(body: &str) -> Vec<String> {
     let mut targets: Vec<String> = Vec::new();
     for node in root.descendants() {
         if let NodeValue::WikiLink(link) = &node.data().value
-            && let Ok(title) = crate::validate_title(&link.url)
-            && !targets.iter().any(|t| t == title)
+            && let Ok(title) = crate::title::clean_title(&link.url)
+            && !targets
+                .iter()
+                .any(|t| crate::title::title_key(t) == crate::title::title_key(&title))
         {
-            targets.push(title.to_owned());
+            targets.push(title);
         }
     }
     targets
@@ -44,6 +47,11 @@ mod tests {
     fn links_in_code_are_ignored() {
         let body = "Inline `[[NotALink]]`.\n\n```\n[[AlsoNot]]\n```\n\n[[Real]]";
         assert_eq!(link_targets(body), ["Real"]);
+    }
+
+    #[test]
+    fn targets_differing_only_in_case_count_once() {
+        assert_eq!(link_targets("[[Rust]] and [[rust]]"), ["Rust"]);
     }
 
     #[test]

@@ -5,24 +5,25 @@
 //! blocking thread.
 
 mod links;
+mod schema;
+mod title;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use rusqlite_migration::{M, Migrations};
 
-const MIGRATIONS_SLICE: &[M<'_>] = &[
-    M::up(include_str!("../migrations/0001-pages.sql")),
-    M::up(include_str!("../migrations/0002-revisions.sql")),
-    M::up(include_str!("../migrations/0003-links.sql")),
+use title::{clean_title, title_key};
+
+/// Page types allowed when none are configured.
+pub const DEFAULT_PAGE_TYPES: &[&str] = &[
+    "project",
+    "technology",
+    "decision",
+    "person",
+    "tool",
+    "concept",
 ];
-/// Schema version that introduced the `link` table; older databases need their links extracted.
-const LINKS_SCHEMA_VERSION: i64 = 3;
-const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
-
-/// Characters that would break the `[[Title|label]]` link syntax.
-const FORBIDDEN_TITLE_CHARS: &[char] = &['[', ']', '|', '\n', '\r'];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -39,6 +40,10 @@ pub enum Error {
         base: Option<u32>,
         current: Box<Page>,
     },
+    #[error("{name:?} is already the title or an alias of the page {page:?}")]
+    NameTaken { name: String, page: String },
+    #[error("unknown page type {given:?}; allowed types: {}", .allowed.join(", "))]
+    UnknownPageType { given: String, allowed: Vec<String> },
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("database migration failed: {0}")]
@@ -65,6 +70,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub title: String,
+    pub page_type: Option<String>,
+    /// Alternative titles that lead to this page, sorted.
+    pub aliases: Vec<String>,
     pub body: String,
     /// Number of this revision; the first revision of a page is 1.
     pub revision: u32,
@@ -74,12 +82,32 @@ pub struct Page {
     pub updated_at: String,
 }
 
+/// What a write changes besides the body. `None` fields keep their current value (for a new
+/// page: no type, no aliases).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageChanges {
+    /// Renames the page; the old title stays reachable as an alias.
+    pub new_title: Option<String>,
+    /// `Some(None)` removes the page type.
+    pub page_type: Option<Option<String>>,
+    /// Replaces all aliases.
+    pub aliases: Option<Vec<String>>,
+}
+
 /// A link from a page to a title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkTarget {
+    /// The title as written in the link.
     pub title: String,
-    /// True if no page has this title yet.
-    pub stub: bool,
+    /// The title of the page the link leads to; `None` if the link leads to a stub.
+    pub page: Option<String>,
+}
+
+impl LinkTarget {
+    /// True if no page has this title (or alias) yet.
+    pub fn is_stub(&self) -> bool {
+        self.page.is_none()
+    }
 }
 
 /// The links around a page or stub.
@@ -87,13 +115,14 @@ pub struct LinkTarget {
 pub struct Links {
     /// Links in the page's current revision, in order of first appearance. Empty for a stub.
     pub outgoing: Vec<LinkTarget>,
-    /// Titles of the pages linking here, sorted.
+    /// Titles of the pages linking here, under its title or any alias, sorted.
     pub backlinks: Vec<String>,
 }
 
 /// The knowledge base, stored in a SQLite database.
 pub struct Knowledge {
     conn: Mutex<Connection>,
+    page_types: Vec<String>,
 }
 
 impl Knowledge {
@@ -110,104 +139,182 @@ impl Knowledge {
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let version_before: i64 =
-            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        MIGRATIONS.to_latest(&mut conn)?;
-        if version_before < LINKS_SCHEMA_VERSION {
-            extract_all_links(&mut conn)?;
-        }
+        schema::migrations().to_latest(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            page_types: DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string()).collect(),
         })
     }
 
-    /// Creates or changes a page.
+    /// Replaces the allowed page types. Types are compared case-insensitively.
+    pub fn with_page_types(mut self, page_types: impl IntoIterator<Item = String>) -> Self {
+        self.page_types = page_types
+            .into_iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        self
+    }
+
+    /// The allowed page types.
+    pub fn page_types(&self) -> &[String] {
+        &self.page_types
+    }
+
+    /// Creates or changes the page with this title or alias.
     ///
     /// Without `base_revision` this only creates a new page. Changing an existing page requires
     /// its current revision as `base_revision`, so that a writer never overwrites a change it
-    /// has not seen; otherwise [`Error::Conflict`] returns the current revision. Writing the
-    /// body the page already has creates no new revision.
-    pub fn write_page(&self, title: &str, body: &str, base_revision: Option<u32>) -> Result<Page> {
-        let title = validate_title(title)?;
+    /// has not seen; otherwise [`Error::Conflict`] returns the current revision. A write that
+    /// changes nothing creates no new revision.
+    pub fn write_page(
+        &self,
+        title: &str,
+        body: &str,
+        base_revision: Option<u32>,
+        changes: PageChanges,
+    ) -> Result<Page> {
+        let title = clean_title(title)?;
+        let page_type = match changes.page_type {
+            Some(page_type) => Some(self.check_page_type(page_type)?),
+            None => None,
+        };
         let mut conn = self.conn();
         let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate)?;
 
-        let page = match current_page(&tx, title)? {
+        let (page_id, next) = match resolve(&tx, &title_key(&title))? {
             None => {
                 if base_revision.is_some() {
-                    return Err(Error::PageNotFound(title.to_owned()));
+                    return Err(Error::PageNotFound(title));
                 }
-                tx.execute("INSERT INTO page (title) VALUES (?1)", [title])?;
-                let page_id = tx.last_insert_rowid();
-                insert_revision(&tx, page_id, 1, body)?;
-                replace_links(&tx, page_id, body)?;
-                current_page(&tx, title)?.expect("page was just inserted")
+                let new_title = match changes.new_title {
+                    Some(new_title) => clean_title(&new_title)?,
+                    None => title,
+                };
+                let snapshot = Snapshot {
+                    title: new_title,
+                    page_type: page_type.flatten(),
+                    aliases: changes.aliases.unwrap_or_default(),
+                    body: body.to_owned(),
+                }
+                .normalized(&tx, NO_PAGE)?;
+                tx.execute(
+                    "INSERT INTO page (title, title_key) VALUES (?1, ?2)",
+                    params![snapshot.title, title_key(&snapshot.title)],
+                )?;
+                (tx.last_insert_rowid(), snapshot)
             }
-            Some((page_id, current)) => {
+            Some(page_id) => {
+                let current = current_page(&tx, page_id)?;
                 if base_revision != Some(current.revision) {
                     return Err(Error::Conflict {
                         base: base_revision,
                         current: Box::new(current),
                     });
                 }
-                if current.body == body {
+                let mut aliases = changes.aliases.unwrap_or_else(|| current.aliases.clone());
+                let new_title = match changes.new_title {
+                    Some(new_title) => {
+                        aliases.push(current.title.clone());
+                        clean_title(&new_title)?
+                    }
+                    None => current.title.clone(),
+                };
+                let snapshot = Snapshot {
+                    title: new_title,
+                    page_type: page_type.unwrap_or_else(|| current.page_type.clone()),
+                    aliases,
+                    body: body.to_owned(),
+                }
+                .normalized(&tx, page_id)?;
+                if snapshot.matches(&current) {
                     return Ok(current);
                 }
-                insert_revision(&tx, page_id, current.revision + 1, body)?;
-                replace_links(&tx, page_id, body)?;
-                current_page(&tx, title)?.expect("page exists")
+                (page_id, snapshot)
             }
         };
+
+        next.store(&tx, page_id)?;
+        let page = current_page(&tx, page_id)?;
         tx.commit()?;
-        Ok(page.1)
+        Ok(page)
     }
 
-    /// Returns the current revision of the page with exactly this title, if it exists.
+    /// Returns the current revision of the page with this title or alias, if it exists.
     pub fn page(&self, title: &str) -> Result<Option<Page>> {
-        Ok(current_page(&self.conn(), title.trim())?.map(|(_, page)| page))
+        let conn = self.conn();
+        match resolve(&conn, &title_key(title))? {
+            Some(page_id) => Ok(Some(current_page(&conn, page_id)?)),
+            None => Ok(None),
+        }
     }
 
-    /// Returns a specific revision of a page, if both exist.
+    /// Returns a specific revision of the page with this title or alias, if both exist.
     pub fn page_revision(&self, title: &str, revision: u32) -> Result<Option<Page>> {
-        Ok(self
-            .conn()
+        let conn = self.conn();
+        let Some(page_id) = resolve(&conn, &title_key(title))? else {
+            return Ok(None);
+        };
+        Ok(conn
             .query_row(
-                &format!("{PAGE_SELECT} WHERE p.title = ?1 AND r.number = ?2"),
-                params![title.trim(), revision],
+                &format!("{PAGE_SELECT} WHERE p.id = ?1 AND r.number = ?2"),
+                params![page_id, revision],
                 row_to_page,
             )
-            .optional()?
-            .map(|(_, page)| page))
+            .optional()?)
     }
 
-    /// Returns the links around a title, whether it is a page or a stub.
+    /// Returns the links around a title or alias, whether it names a page or a stub.
     pub fn links(&self, title: &str) -> Result<Links> {
         let conn = self.conn();
-        let title = title.trim();
+        let key = title_key(title);
+        let Some(page_id) = resolve(&conn, &key)? else {
+            return Ok(Links {
+                outgoing: Vec::new(),
+                backlinks: backlinks(&conn, None, &[key])?,
+            });
+        };
+
         let outgoing = conn
-            .prepare(
-                "SELECT l.target_title, NOT EXISTS (SELECT 1 FROM page t WHERE t.title = l.target_title) \
-                 FROM link l JOIN page p ON p.id = l.source_page_id \
-                 WHERE p.title = ?1 ORDER BY l.position",
-            )?
-            .query_map([title], |row| {
+            .prepare(&format!(
+                "SELECT l.target_title, t.title FROM link l \
+                 LEFT JOIN ({RESOLVED_KEYS}) k ON k.key = l.target_key \
+                 LEFT JOIN page t ON t.id = k.page_id \
+                 WHERE l.source_page_id = ?1 AND k.page_id IS NOT ?1 \
+                 ORDER BY l.position"
+            ))?
+            .query_map([page_id], |row| {
                 Ok(LinkTarget {
                     title: row.get(0)?,
-                    stub: row.get(1)?,
+                    page: row.get(1)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        let backlinks = conn
-            .prepare(
-                "SELECT p.title FROM link l JOIN page p ON p.id = l.source_page_id \
-                 WHERE l.target_title = ?1 ORDER BY p.title",
-            )?
-            .query_map([title], |row| row.get(0))?
+        let keys: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT key FROM ({RESOLVED_KEYS}) WHERE page_id = ?1"
+            ))?
+            .query_map([page_id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Links {
             outgoing,
-            backlinks,
+            backlinks: backlinks(&conn, Some(page_id), &keys)?,
         })
+    }
+
+    fn check_page_type(&self, page_type: Option<String>) -> Result<Option<String>> {
+        let Some(given) = page_type else {
+            return Ok(None);
+        };
+        let normalized = given.trim().to_lowercase();
+        if self.page_types.contains(&normalized) {
+            Ok(Some(normalized))
+        } else {
+            Err(Error::UnknownPageType {
+                given,
+                allowed: self.page_types.clone(),
+            })
+        }
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -219,317 +326,164 @@ impl Knowledge {
     }
 }
 
-fn validate_title(title: &str) -> Result<&str> {
-    let trimmed = title.trim();
-    if trimmed.is_empty() || trimmed.contains(FORBIDDEN_TITLE_CHARS) {
-        return Err(Error::InvalidTitle(title.to_owned()));
-    }
-    Ok(trimmed)
-}
+/// A page ID no page has (SQLite row IDs start at 1).
+const NO_PAGE: i64 = 0;
 
-const PAGE_SELECT: &str = "SELECT p.id, p.title, r.body, r.number, p.created_at, r.created_at \
-     FROM page p JOIN revision r ON r.page_id = p.id";
+/// Every key that leads to a page: its title key and its aliases' keys.
+const RESOLVED_KEYS: &str =
+    "SELECT title_key AS key, id AS page_id FROM page UNION ALL SELECT key, page_id FROM alias";
 
-fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Page)> {
-    Ok((
-        row.get(0)?,
-        Page {
-            title: row.get(1)?,
-            body: row.get(2)?,
-            revision: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
-        },
-    ))
-}
-
-/// Returns the page's ID and its current revision.
-fn current_page(conn: &Connection, title: &str) -> Result<Option<(i64, Page)>> {
+/// Returns the ID of the page whose title or alias has this key.
+fn resolve(conn: &Connection, key: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
-            &format!("{PAGE_SELECT} WHERE p.title = ?1 ORDER BY r.number DESC LIMIT 1"),
-            [title],
-            row_to_page,
+            &format!("SELECT page_id FROM ({RESOLVED_KEYS}) WHERE key = ?1"),
+            [key],
+            |row| row.get(0),
         )
         .optional()?)
 }
 
-/// Replaces the page's links with those in `body`. A page never links to itself.
-fn replace_links(conn: &Connection, page_id: i64, body: &str) -> Result<()> {
+/// Titles of the pages linking to any of `keys`, except `page_id` itself.
+fn backlinks(conn: &Connection, page_id: Option<i64>, keys: &[String]) -> Result<Vec<String>> {
+    let mut backlinks = Vec::new();
+    let mut query = conn.prepare(
+        "SELECT p.title FROM link l JOIN page p ON p.id = l.source_page_id \
+         WHERE l.target_key = ?1 AND p.id IS NOT ?2",
+    )?;
+    for key in keys {
+        for title in query.query_map(params![key, page_id], |row| row.get::<_, String>(0))? {
+            backlinks.push(title?);
+        }
+    }
+    backlinks.sort();
+    backlinks.dedup();
+    Ok(backlinks)
+}
+
+/// Everything a revision records about a page.
+struct Snapshot {
+    title: String,
+    page_type: Option<String>,
+    aliases: Vec<String>,
+    body: String,
+}
+
+impl Snapshot {
+    /// Cleans and sorts the aliases, drops those equal to the title, and checks that neither
+    /// title nor aliases belong to another page.
+    fn normalized(mut self, conn: &Connection, page_id: i64) -> Result<Self> {
+        let mut aliases: Vec<String> = Vec::new();
+        for alias in &self.aliases {
+            let alias = clean_title(alias)?;
+            if title_key(&alias) != title_key(&self.title)
+                && !aliases.iter().any(|a| title_key(a) == title_key(&alias))
+            {
+                aliases.push(alias);
+            }
+        }
+        aliases.sort();
+        self.aliases = aliases;
+
+        for name in std::iter::once(&self.title).chain(&self.aliases) {
+            if let Some(owner) = resolve(conn, &title_key(name))?
+                && owner != page_id
+            {
+                let page =
+                    conn.query_row("SELECT title FROM page WHERE id = ?1", [owner], |row| {
+                        row.get(0)
+                    })?;
+                return Err(Error::NameTaken {
+                    name: name.clone(),
+                    page,
+                });
+            }
+        }
+        Ok(self)
+    }
+
+    fn matches(&self, page: &Page) -> bool {
+        self.title == page.title
+            && self.page_type == page.page_type
+            && self.aliases == page.aliases
+            && self.body == page.body
+    }
+
+    /// Records this snapshot as the page's next revision and updates its title, type, aliases
+    /// and links accordingly.
+    fn store(&self, tx: &Transaction<'_>, page_id: i64) -> Result<()> {
+        let number: u32 = tx.query_row(
+            "SELECT coalesce(max(number), 0) + 1 FROM revision WHERE page_id = ?1",
+            [page_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO revision (page_id, number, title, page_type, aliases, body) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                page_id,
+                number,
+                self.title,
+                self.page_type,
+                self.aliases.join("\n"),
+                self.body
+            ],
+        )?;
+        tx.execute(
+            "UPDATE page SET title = ?2, title_key = ?3, page_type = ?4 WHERE id = ?1",
+            params![page_id, self.title, title_key(&self.title), self.page_type],
+        )?;
+        tx.execute("DELETE FROM alias WHERE page_id = ?1", [page_id])?;
+        for alias in &self.aliases {
+            tx.execute(
+                "INSERT INTO alias (key, alias, page_id) VALUES (?1, ?2, ?3)",
+                params![title_key(alias), alias, page_id],
+            )?;
+        }
+        replace_links(tx, page_id, &self.body)
+    }
+}
+
+const PAGE_SELECT: &str = "SELECT r.title, r.page_type, r.aliases, r.body, r.number, \
+     p.created_at, r.created_at FROM page p JOIN revision r ON r.page_id = p.id";
+
+fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
+    let aliases: String = row.get(2)?;
+    Ok(Page {
+        title: row.get(0)?,
+        page_type: row.get(1)?,
+        aliases: aliases
+            .split('\n')
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        body: row.get(3)?,
+        revision: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn current_page(conn: &Connection, page_id: i64) -> Result<Page> {
+    Ok(conn.query_row(
+        &format!("{PAGE_SELECT} WHERE p.id = ?1 ORDER BY r.number DESC LIMIT 1"),
+        [page_id],
+        row_to_page,
+    )?)
+}
+
+/// Replaces the page's links with those in `body`.
+pub(crate) fn replace_links(conn: &Connection, page_id: i64, body: &str) -> Result<()> {
     conn.execute("DELETE FROM link WHERE source_page_id = ?1", [page_id])?;
     let mut insert = conn.prepare(
-        "INSERT INTO link (source_page_id, target_title, position) \
-         SELECT ?1, ?2, ?3 WHERE ?2 <> (SELECT title FROM page WHERE id = ?1)",
+        "INSERT INTO link (source_page_id, target_title, target_key, position) \
+         VALUES (?1, ?2, ?3, ?4)",
     )?;
     for (position, target) in (0_i64..).zip(links::link_targets(body)) {
-        insert.execute(params![page_id, target, position])?;
+        insert.execute(params![page_id, target, title_key(&target), position])?;
     }
-    Ok(())
-}
-
-/// Extracts the links of every page's current revision, for databases created before links
-/// existed.
-fn extract_all_links(conn: &mut Connection) -> Result<()> {
-    let tx = conn.transaction()?;
-    let pages: Vec<(i64, String)> = tx
-        .prepare(
-            "SELECT r.page_id, r.body FROM revision r \
-             WHERE r.number = (SELECT max(number) FROM revision WHERE page_id = r.page_id)",
-        )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (page_id, body) in pages {
-        replace_links(&tx, page_id, &body)?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-fn insert_revision(conn: &Connection, page_id: i64, number: u32, body: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO revision (page_id, number, body) VALUES (?1, ?2, ?3)",
-        params![page_id, number, body],
-    )?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn knowledge() -> Knowledge {
-        Knowledge::open_in_memory().unwrap()
-    }
-
-    #[test]
-    fn migrations_are_valid() {
-        MIGRATIONS.validate().unwrap();
-    }
-
-    #[test]
-    fn created_page_can_be_read_back() {
-        let knowledge = knowledge();
-        let created = knowledge
-            .write_page("Rauthy", "An OIDC provider.", None)
-            .unwrap();
-        assert_eq!(created.title, "Rauthy");
-        assert_eq!(created.revision, 1);
-
-        let read = knowledge.page("Rauthy").unwrap().unwrap();
-        assert_eq!(read, created);
-    }
-
-    #[test]
-    fn missing_page_is_none() {
-        assert_eq!(knowledge().page("Nothing").unwrap(), None);
-    }
-
-    #[test]
-    fn title_is_trimmed() {
-        let knowledge = knowledge();
-        knowledge.write_page("  Rust ", "", None).unwrap();
-        assert!(knowledge.page("Rust").unwrap().is_some());
-    }
-
-    #[test]
-    fn titles_breaking_link_syntax_are_rejected() {
-        let knowledge = knowledge();
-        for title in ["", "   ", "a|b", "[[x]]", "two\nlines"] {
-            let err = knowledge.write_page(title, "", None).unwrap_err();
-            assert!(matches!(err, Error::InvalidTitle(_)), "{title:?}");
-        }
-    }
-
-    #[test]
-    fn update_with_current_base_creates_a_new_revision_and_keeps_the_old_one() {
-        let knowledge = knowledge();
-        knowledge.write_page("Caddy", "v1", None).unwrap();
-        let updated = knowledge.write_page("Caddy", "v2", Some(1)).unwrap();
-        assert_eq!(updated.revision, 2);
-        assert_eq!(updated.body, "v2");
-        assert_eq!(knowledge.page("Caddy").unwrap().unwrap(), updated);
-
-        let first = knowledge.page_revision("Caddy", 1).unwrap().unwrap();
-        assert_eq!(first.body, "v1");
-        assert_eq!(first.created_at, updated.created_at);
-    }
-
-    #[test]
-    fn update_without_base_is_a_conflict() {
-        let knowledge = knowledge();
-        knowledge.write_page("Rust", "first", None).unwrap();
-        let err = knowledge.write_page("Rust", "second", None).unwrap_err();
-        let Error::Conflict { base, current } = err else {
-            panic!("expected a conflict, got {err:?}");
-        };
-        assert_eq!(base, None);
-        assert_eq!((current.revision, current.body.as_str()), (1, "first"));
-    }
-
-    #[test]
-    fn update_with_stale_base_is_a_conflict_and_changes_nothing() {
-        let knowledge = knowledge();
-        knowledge.write_page("Rust", "v1", None).unwrap();
-        knowledge
-            .write_page("Rust", "v2 by agent A", Some(1))
-            .unwrap();
-
-        let err = knowledge
-            .write_page("Rust", "v2 by agent B", Some(1))
-            .unwrap_err();
-        let Error::Conflict { base, current } = err else {
-            panic!("expected a conflict, got {err:?}");
-        };
-        assert_eq!(base, Some(1));
-        assert_eq!(
-            (current.revision, current.body.as_str()),
-            (2, "v2 by agent A")
-        );
-        assert_eq!(knowledge.page("Rust").unwrap().unwrap().revision, 2);
-    }
-
-    #[test]
-    fn base_revision_for_a_missing_page_is_rejected() {
-        let err = knowledge().write_page("Nothing", "x", Some(1)).unwrap_err();
-        assert!(matches!(err, Error::PageNotFound(_)));
-    }
-
-    #[test]
-    fn unchanged_body_creates_no_revision() {
-        let knowledge = knowledge();
-        knowledge.write_page("Rust", "same", None).unwrap();
-        let page = knowledge.write_page("Rust", "same", Some(1)).unwrap();
-        assert_eq!(page.revision, 1);
-    }
-
-    #[test]
-    fn data_survives_reopening() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mnemograph.db");
-        Knowledge::open(&path)
-            .unwrap()
-            .write_page("Caddy", "A reverse proxy.", None)
-            .unwrap();
-        let reopened = Knowledge::open(&path).unwrap();
-        assert_eq!(
-            reopened.page("Caddy").unwrap().unwrap().body,
-            "A reverse proxy."
-        );
-    }
-
-    fn target(title: &str, stub: bool) -> LinkTarget {
-        LinkTarget {
-            title: title.to_owned(),
-            stub,
-        }
-    }
-
-    #[test]
-    fn links_are_extracted_and_unwritten_titles_are_stubs() {
-        let knowledge = knowledge();
-        knowledge.write_page("Rust", "A language.", None).unwrap();
-        knowledge
-            .write_page(
-                "mnemograph",
-                "Written in [[Rust]], uses [[Tantivy|a search index]].",
-                None,
-            )
-            .unwrap();
-
-        let links = knowledge.links("mnemograph").unwrap();
-        assert_eq!(
-            links.outgoing,
-            [target("Rust", false), target("Tantivy", true)]
-        );
-        assert_eq!(knowledge.links("Rust").unwrap().backlinks, ["mnemograph"]);
-    }
-
-    #[test]
-    fn stub_has_backlinks_and_becomes_a_page_when_written() {
-        let knowledge = knowledge();
-        knowledge.write_page("A", "See [[Caddy]].", None).unwrap();
-        knowledge.write_page("B", "Also [[Caddy]].", None).unwrap();
-
-        let stub = knowledge.links("Caddy").unwrap();
-        assert!(stub.outgoing.is_empty());
-        assert_eq!(stub.backlinks, ["A", "B"]);
-
-        knowledge
-            .write_page("Caddy", "A reverse proxy.", None)
-            .unwrap();
-        assert_eq!(
-            knowledge.links("A").unwrap().outgoing,
-            [target("Caddy", false)]
-        );
-        assert_eq!(knowledge.links("Caddy").unwrap().backlinks, ["A", "B"]);
-    }
-
-    #[test]
-    fn new_revision_replaces_links() {
-        let knowledge = knowledge();
-        knowledge
-            .write_page("Page", "[[Old]] and [[Kept]]", None)
-            .unwrap();
-        knowledge
-            .write_page("Page", "[[Kept]] and [[New]]", Some(1))
-            .unwrap();
-
-        let titles: Vec<_> = knowledge
-            .links("Page")
-            .unwrap()
-            .outgoing
-            .into_iter()
-            .map(|l| l.title)
-            .collect();
-        assert_eq!(titles, ["Kept", "New"]);
-        assert!(knowledge.links("Old").unwrap().backlinks.is_empty());
-    }
-
-    #[test]
-    fn self_links_are_ignored() {
-        let knowledge = knowledge();
-        knowledge
-            .write_page("Rust", "[[Rust]] is [[Rust]].", None)
-            .unwrap();
-        assert_eq!(knowledge.links("Rust").unwrap(), Links::default());
-    }
-
-    #[test]
-    fn migration_extracts_links_of_existing_pages() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_version(&mut conn, 2).unwrap();
-        conn.execute_batch(
-            "INSERT INTO page (id, title) VALUES (1, 'Old');
-             INSERT INTO revision (page_id, number, body) VALUES (1, 1, '[[Gone]]'), (1, 2, '[[Current]]');",
-        )
-        .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v2.db");
-        conn.backup(rusqlite::MAIN_DB, &path, None).unwrap();
-        drop(conn);
-
-        let knowledge = Knowledge::open(&path).unwrap();
-        assert_eq!(
-            knowledge.links("Old").unwrap().outgoing,
-            [target("Current", true)]
-        );
-    }
-
-    #[test]
-    fn migration_turns_existing_pages_into_first_revisions() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_version(&mut conn, 1).unwrap();
-        conn.execute(
-            "INSERT INTO page (title, body) VALUES ('Old', 'from v1 schema')",
-            [],
-        )
-        .unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
-
-        let knowledge = Knowledge {
-            conn: Mutex::new(conn),
-        };
-        let page = knowledge.page("Old").unwrap().unwrap();
-        assert_eq!((page.revision, page.body.as_str()), (1, "from v1 schema"));
-    }
-}
+mod tests;
