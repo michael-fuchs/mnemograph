@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mnemograph_core::{Knowledge, Links, Page, PageChanges};
+use mnemograph_core::{Knowledge, LinkTarget, Links, Note, Page, PageChanges};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -14,7 +14,12 @@ use serde::{Deserialize, Serialize};
 const INSTRUCTIONS: &str = "mnemograph is a long-term memory shared between agents and its owner. \
 Knowledge is organized in pages, each about one subject and identified by its title. \
 Titles are case-insensitive, and a page can have aliases that lead to it. \
-Use read_page to look up what is already known about a subject before writing, and write_page to record new pages.";
+Use read_page to look up what is already known about a subject before writing, and write_page to record new pages. \
+Use add_note for short, timestamped records such as decisions, findings or events; link the pages they concern with [[Title]]. \
+Notes are append-only and appear on the pages they link to.";
+
+/// How many recent notes read_page returns.
+const RECENT_NOTES: u32 = 10;
 
 /// The MCP server; one instance is created per request.
 #[derive(Clone)]
@@ -42,6 +47,29 @@ pub struct PageView {
     pub links: Vec<LinkView>,
     /// Titles of the pages linking to this page.
     pub backlinks: Vec<String>,
+    /// The most recent notes linking to this page, newest first.
+    pub notes: Vec<NoteView>,
+}
+
+/// A note as returned to agents.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NoteView {
+    pub id: i64,
+    pub body: String,
+    pub created_at: String,
+    /// Titles the note links to.
+    pub links: Vec<LinkView>,
+}
+
+impl From<Note> for NoteView {
+    fn from(note: Note) -> Self {
+        Self {
+            id: note.id,
+            body: note.body,
+            created_at: note.created_at,
+            links: note.links.into_iter().map(LinkView::from).collect(),
+        }
+    }
 }
 
 /// A link from a page to a title.
@@ -56,8 +84,18 @@ pub struct LinkView {
     pub page: Option<String>,
 }
 
+impl From<LinkTarget> for LinkView {
+    fn from(link: LinkTarget) -> Self {
+        Self {
+            stub: link.is_stub(),
+            page: link.page.filter(|page| *page != link.title),
+            title: link.title,
+        }
+    }
+}
+
 impl PageView {
-    fn new(page: Page, links: Links) -> Self {
+    fn new(page: Page, links: Links, notes: Vec<Note>) -> Self {
         Self {
             title: page.title,
             page_type: page.page_type,
@@ -66,16 +104,9 @@ impl PageView {
             revision: page.revision,
             created_at: page.created_at,
             updated_at: page.updated_at,
-            links: links
-                .outgoing
-                .into_iter()
-                .map(|link| LinkView {
-                    stub: link.is_stub(),
-                    page: link.page.filter(|page| *page != link.title),
-                    title: link.title,
-                })
-                .collect(),
+            links: links.outgoing.into_iter().map(LinkView::from).collect(),
             backlinks: links.backlinks,
+            notes: notes.into_iter().map(NoteView::from).collect(),
         }
     }
 }
@@ -102,6 +133,13 @@ pub struct WritePageArgs {
     /// Replaces all aliases (alternative titles leading to this page). Omit to keep them.
     #[serde(default)]
     pub aliases: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddNoteArgs {
+    /// The note in Markdown: what happened or was decided, and why. Link the pages it concerns
+    /// with [[Title]]; titles without a page yet are fine.
+    pub body: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -138,7 +176,8 @@ impl McpServer {
             let page =
                 knowledge.write_page(&args.title, &args.body, args.base_revision, changes)?;
             let links = knowledge.links(&page.title)?;
-            Ok(PageView::new(page, links))
+            let notes = knowledge.notes_about(&page.title, RECENT_NOTES)?;
+            Ok(PageView::new(page, links, notes))
         })
         .await
         .map(rmcp::Json)
@@ -153,19 +192,37 @@ impl McpServer {
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
         let title = args.title;
-        let (page, links) = blocking({
+        let (page, links, notes) = blocking({
             let title = title.clone();
-            move || Ok((knowledge.page(&title)?, knowledge.links(&title)?))
+            move || {
+                Ok((
+                    knowledge.page(&title)?,
+                    knowledge.links(&title)?,
+                    knowledge.notes_about(&title, RECENT_NOTES)?,
+                ))
+            }
         })
         .await?;
         match page {
-            Some(page) => Ok(rmcp::Json(PageView::new(page, links))),
-            None if links.backlinks.is_empty() => Err(format!("no page titled {title:?}")),
-            None => Err(format!(
-                "no page titled {title:?} yet; it is a stub linked from: {}. Create it with write_page.",
-                links.backlinks.join(", ")
-            )),
+            Some(page) => Ok(rmcp::Json(PageView::new(page, links, notes))),
+            None if links.backlinks.is_empty() && notes.is_empty() => {
+                Err(format!("no page titled {title:?}"))
+            }
+            None => Err(stub_message(&title, &links.backlinks, &notes)),
         }
+    }
+
+    #[tool(
+        description = "Record a note: a short, timestamped, append-only entry such as a decision, finding or event. [[Title]] links attach it to the pages it concerns, where read_page shows it."
+    )]
+    async fn add_note(
+        &self,
+        Parameters(args): Parameters<AddNoteArgs>,
+    ) -> Result<rmcp::Json<NoteView>, String> {
+        let knowledge = self.knowledge.clone();
+        blocking(move || knowledge.add_note(&args.body))
+            .await
+            .map(|note| rmcp::Json(note.into()))
     }
 }
 
@@ -179,6 +236,26 @@ impl ServerHandler for McpServer {
                 self.knowledge.page_types().join(", ")
             ))
     }
+}
+
+/// Explains that `title` is a stub, with what links to it.
+fn stub_message(title: &str, backlinks: &[String], notes: &[Note]) -> String {
+    let mut message = format!("no page titled {title:?} yet; it is a stub");
+    if !backlinks.is_empty() {
+        message += &format!(" linked from the pages: {}", backlinks.join(", "));
+    }
+    if !notes.is_empty() {
+        let notes = serde_json::to_string(
+            &notes
+                .iter()
+                .cloned()
+                .map(NoteView::from)
+                .collect::<Vec<_>>(),
+        )
+        .expect("notes serialize");
+        message += &format!(". Recent notes about it: {notes}");
+    }
+    message + ". Create it with write_page."
 }
 
 /// Turns a domain error into a message the agent can act on.

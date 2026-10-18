@@ -5,6 +5,7 @@
 //! blocking thread.
 
 mod links;
+mod notes;
 mod schema;
 mod title;
 
@@ -13,6 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub use notes::Note;
 use title::{clean_title, title_key};
 
 /// Page types allowed when none are configured.
@@ -44,6 +46,8 @@ pub enum Error {
     NameTaken { name: String, page: String },
     #[error("unknown page type {given:?}; allowed types: {}", .allowed.join(", "))]
     UnknownPageType { given: String, allowed: Vec<String> },
+    #[error("a note must not be empty")]
+    EmptyNote,
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("database migration failed: {0}")]
@@ -267,11 +271,11 @@ impl Knowledge {
     /// Returns the links around a title or alias, whether it names a page or a stub.
     pub fn links(&self, title: &str) -> Result<Links> {
         let conn = self.conn();
-        let key = title_key(title);
-        let Some(page_id) = resolve(&conn, &key)? else {
+        let (page_id, keys) = names(&conn, title)?;
+        let Some(page_id) = page_id else {
             return Ok(Links {
                 outgoing: Vec::new(),
-                backlinks: backlinks(&conn, None, &[key])?,
+                backlinks: backlinks(&conn, None, &keys)?,
             });
         };
 
@@ -289,12 +293,6 @@ impl Knowledge {
                     page: row.get(1)?,
                 })
             })?
-            .collect::<rusqlite::Result<_>>()?;
-        let keys: Vec<String> = conn
-            .prepare(&format!(
-                "SELECT key FROM ({RESOLVED_KEYS}) WHERE page_id = ?1"
-            ))?
-            .query_map([page_id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Links {
             outgoing,
@@ -342,6 +340,22 @@ fn resolve(conn: &Connection, key: &str) -> Result<Option<i64>> {
             |row| row.get(0),
         )
         .optional()?)
+}
+
+/// Resolves a title or alias: returns the page it names (if any) and every key leading there —
+/// the page's title and alias keys, or just the title's own key for a stub.
+fn names(conn: &Connection, title: &str) -> Result<(Option<i64>, Vec<String>)> {
+    let key = title_key(title);
+    let Some(page_id) = resolve(conn, &key)? else {
+        return Ok((None, vec![key]));
+    };
+    let keys = conn
+        .prepare(&format!(
+            "SELECT key FROM ({RESOLVED_KEYS}) WHERE page_id = ?1"
+        ))?
+        .query_map([page_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((Some(page_id), keys))
 }
 
 /// Titles of the pages linking to any of `keys`, except `page_id` itself.

@@ -29,7 +29,8 @@ claude mcp add --transport http mnemograph http://localhost:8080/mcp
 Claude Code then has these tools:
 
 - `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, or a new title (the old title stays an alias). `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
-- `read_page`: read a page by title or alias, with its current revision, the titles it links to and the pages linking to it.
+- `read_page`: read a page by title or alias, with its current revision, the titles it links to, the pages linking to it and its most recent notes.
+- `add_note`: record a short, timestamped, append-only note; its `[[links]]` attach it to the pages (or stubs) it concerns.
 
 Titles and aliases are compared case-insensitively, with whitespace collapsed.
 

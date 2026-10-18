@@ -98,13 +98,13 @@ async fn agent_writes_and_reads_a_page() {
 }
 
 #[tokio::test]
-async fn server_lists_both_tools_and_instructions() {
+async fn server_lists_its_tools_and_instructions() {
     let server = TestServer::start().await;
 
     let tools = server.client.list_all_tools().await.unwrap();
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, ["read_page", "write_page"]);
+    assert_eq!(names, ["add_note", "read_page", "write_page"]);
 
     let info = server.client.peer_info().expect("server info");
     assert!(
@@ -224,7 +224,10 @@ async fn reading_a_stub_names_the_linking_pages_until_it_is_written() {
 
     let result = server.call("read_page", json!({ "title": "Caddy" })).await;
     let error = error_text(&result);
-    assert!(error.contains("stub linked from: Notes"), "{error}");
+    assert!(
+        error.contains("stub linked from the pages: Notes"),
+        "{error}"
+    );
 
     server
         .call(
@@ -330,4 +333,58 @@ async fn empty_page_type_removes_the_type() {
         .await;
     assert_eq!(structured(&updated).get("page_type"), None);
     assert_eq!(structured(&updated)["revision"], 2);
+}
+
+#[tokio::test]
+async fn notes_appear_on_the_pages_they_link_to() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Reverse proxy", "body": "" }),
+        )
+        .await;
+    let note = server
+        .call(
+            "add_note",
+            json!({ "body": "Decided [[Reverse proxy|the proxy]] is [[Caddy]]: automatic HTTPS." }),
+        )
+        .await;
+    let note = structured(&note).clone();
+    assert_eq!(
+        note["links"],
+        json!([
+            { "title": "Reverse proxy", "stub": false },
+            { "title": "Caddy", "stub": true }
+        ])
+    );
+
+    let page = server
+        .call("read_page", json!({ "title": "reverse proxy" }))
+        .await;
+    assert_eq!(structured(&page)["notes"], json!([note]));
+}
+
+#[tokio::test]
+async fn reading_a_stub_shows_its_notes() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "add_note",
+            json!({ "body": "Evaluate [[Tantivy]] for search." }),
+        )
+        .await;
+    let result = server
+        .call("read_page", json!({ "title": "Tantivy" }))
+        .await;
+    let error = error_text(&result);
+    assert!(error.contains("it is a stub"), "{error}");
+    assert!(error.contains("Evaluate"), "{error}");
+}
+
+#[tokio::test]
+async fn empty_note_is_rejected() {
+    let server = TestServer::start().await;
+    let result = server.call("add_note", json!({ "body": "  " })).await;
+    assert!(error_text(&result).contains("must not be empty"));
 }

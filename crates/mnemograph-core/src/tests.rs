@@ -590,3 +590,87 @@ fn migration_refuses_titles_that_collide_after_normalization() {
     let err = Knowledge::open(&path).err().expect("migration must fail");
     assert!(err.to_string().contains("differ only in case"), "{err}");
 }
+
+// Notes
+
+#[test]
+fn note_links_attach_it_to_pages_and_stubs() {
+    let knowledge = knowledge();
+    create(&knowledge, "Reverse proxy", "");
+    let note = knowledge
+        .add_note("Decided [[reverse proxy|the proxy]] is [[Caddy]] because of automatic HTTPS.")
+        .unwrap();
+    assert!(note.created_at.ends_with('Z'));
+    assert_eq!(
+        note.links,
+        [
+            link("reverse proxy", Some("Reverse proxy")),
+            link("Caddy", None)
+        ]
+    );
+
+    assert_eq!(
+        knowledge.notes_about("Reverse Proxy", 10).unwrap(),
+        std::slice::from_ref(&note)
+    );
+    assert_eq!(knowledge.notes_about("caddy", 10).unwrap(), [note]);
+}
+
+#[test]
+fn notes_about_a_page_include_links_to_its_aliases_newest_first() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rust",
+            "",
+            None,
+            PageChanges {
+                aliases: Some(vec!["rustlang".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let first = knowledge.add_note("[[Rust]] 1.99 is out.").unwrap();
+    knowledge.add_note("Unrelated [[Caddy]] note.").unwrap();
+    let second = knowledge
+        .add_note("[[rustlang]] and [[Rust]] again.")
+        .unwrap();
+
+    let notes = knowledge.notes_about("Rust", 10).unwrap();
+    assert_eq!(
+        notes.iter().map(|n| n.id).collect::<Vec<_>>(),
+        [second.id, first.id]
+    );
+    assert_eq!(knowledge.notes_about("Rust", 1).unwrap().len(), 1);
+}
+
+#[test]
+fn notes_attached_to_a_stub_stay_attached_when_it_becomes_a_page() {
+    let knowledge = knowledge();
+    let note = knowledge.add_note("Look into [[Tantivy]].").unwrap();
+    create(&knowledge, "Tantivy", "A search library.");
+    let notes = knowledge.notes_about("Tantivy", 10).unwrap();
+    assert_eq!(notes[0].id, note.id);
+    assert_eq!(notes[0].links, [link("Tantivy", Some("Tantivy"))]);
+}
+
+#[test]
+fn notes_without_links_are_allowed_but_empty_notes_are_not() {
+    let knowledge = knowledge();
+    assert!(
+        knowledge
+            .add_note("Just a thought.")
+            .unwrap()
+            .links
+            .is_empty()
+    );
+    assert!(matches!(knowledge.add_note("  \n "), Err(Error::EmptyNote)));
+}
+
+#[test]
+fn notes_are_not_backlinks() {
+    let knowledge = knowledge();
+    create(&knowledge, "Rust", "");
+    knowledge.add_note("[[Rust]]").unwrap();
+    assert!(knowledge.links("Rust").unwrap().backlinks.is_empty());
+}
