@@ -38,6 +38,22 @@ Claude Code then has these tools:
 
 Titles and aliases are compared case-insensitively, with whitespace collapsed.
 
+### Telling agents to use it
+
+mnemograph sends usage instructions to every agent that connects. To make an agent use it as *the* memory for a repository, add this to the repository's `CLAUDE.md` (or `AGENTS.md`) and replace `<project>` with the title of the project's page:
+
+```markdown
+## Memory
+
+This project's long-term memory is the `mnemograph` MCP server; its page for this project is `<project>`.
+Use it instead of local memory files.
+
+- Before starting a task, search mnemograph for the task's subject and read the `<project>` page.
+- Record decisions, findings and notable events with `add_note` as they happen, saying what and why,
+  and link `[[<project>]]` plus the pages they concern.
+- Keep durable knowledge in pages (`write_page`); update existing pages instead of creating near-duplicates.
+```
+
 ## Development
 
 ```sh

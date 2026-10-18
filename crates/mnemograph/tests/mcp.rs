@@ -110,12 +110,17 @@ async fn server_lists_its_tools_and_instructions() {
     );
 
     let info = server.client.peer_info().expect("server info");
-    assert!(
-        info.instructions
-            .as_deref()
-            .unwrap_or("")
-            .contains("mnemograph")
-    );
+    let instructions = info.instructions.as_deref().unwrap_or("");
+    assert!(instructions.contains("mnemograph"));
+    // The instructions must describe the actual tool set: every tool is mentioned, and no
+    // deletion tool is promised.
+    for name in &names {
+        assert!(
+            instructions.contains(name.as_str()),
+            "instructions do not mention {name}"
+        );
+    }
+    assert!(instructions.contains("You cannot delete anything"));
 }
 
 #[tokio::test]

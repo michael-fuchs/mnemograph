@@ -13,12 +13,27 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-const INSTRUCTIONS: &str = "mnemograph is a long-term memory shared between agents and its owner. \
-Knowledge is organized in pages, each about one subject and identified by its title. \
-Titles are case-insensitive, and a page can have aliases that lead to it. \
-Use search to find what is already known (it understands German and English word forms) and read_page to read a subject before writing; and write_page to record new pages. \
-Use add_note for short, timestamped records such as decisions, findings or events; link the pages they concern with [[Title]]. \
-Notes are append-only and appear on the pages they link to.";
+/// Sent to agents when they connect; tells them what mnemograph is and how to work with it.
+const INSTRUCTIONS: &str = "\
+mnemograph is the long-term memory shared by its owner and their AI agents. It holds:
+- pages: one per subject (a project, technology, decision, person, tool or concept), identified by a \
+case-insensitive title, optionally with aliases and a page type;
+- notes: short, timestamped, append-only records that link to the pages they concern.
+
+How to work with it:
+1. Before starting a task, search for its subject and for the project you work on, and read the \
+pages you find. read_page shows a page's links, backlinks and recent notes; related shows what is \
+around it.
+2. Reuse existing pages. Before creating a page, search for its subject: if it exists under another \
+name, link to that title or add an alias instead of creating a near-duplicate.
+3. Record decisions, findings and notable events as notes with add_note when they happen: state what \
+and why, and link the pages concerned with [[Title]] - always including the project's page. Linking a \
+title that has no page yet is fine; it becomes a stub that a page can fill later.
+4. Keep durable knowledge in pages, written with write_page. To change a page, read it, then send \
+the complete new body with its revision as base_revision. If someone changed it meanwhile, the error contains the current \
+revision: merge your change into it and retry.
+5. Never store secrets such as passwords, tokens or private keys.
+6. You cannot delete anything; tell the owner if something should be removed.";
 
 /// How many recent notes read_page returns.
 const RECENT_NOTES: u32 = 10;
@@ -256,7 +271,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create a page, or change an existing one by sending its complete new body together with the revision it is based on. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision as base_revision."
+        description = "Create a page, or change an existing one. To create, omit base_revision (fails if the title or an alias already exists). To change, send the complete new body (not a diff) and the page's current revision as base_revision; omitted page_type and aliases stay as they are. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision. Returns the page with its links, marking stubs."
     )]
     async fn write_page(
         &self,
@@ -285,7 +300,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Read a page by its title or an alias, with the titles it links to and the pages linking to it."
+        description = "Read a page by its title or an alias (case-insensitive): its body, revision, type, aliases, the titles it links to, the pages linking to it and its most recent notes. For a stub (a title that is linked but has no page yet) the error says what links to it."
     )]
     async fn read_page(
         &self,
@@ -314,7 +329,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search pages and notes by full text, best matches first. Use it before writing to find existing pages on a subject."
+        description = "Search pages (titles, aliases, bodies) and notes by full text, best matches first, each with a snippet. Understands German and English word forms. Use it before starting a task and before creating a page."
     )]
     async fn search(
         &self,
@@ -373,7 +388,7 @@ impl ServerHandler for McpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mnemograph", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS} Allowed page types: {}.",
+                "{INSTRUCTIONS}\n\nAllowed page types: {}.",
                 self.knowledge.page_types().join(", ")
             ))
     }
