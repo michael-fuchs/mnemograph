@@ -4,6 +4,8 @@
 //! source of truth (ADR 0003). The API is synchronous; async callers should run it on a
 //! blocking thread.
 
+mod links;
+
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -13,7 +15,10 @@ use rusqlite_migration::{M, Migrations};
 const MIGRATIONS_SLICE: &[M<'_>] = &[
     M::up(include_str!("../migrations/0001-pages.sql")),
     M::up(include_str!("../migrations/0002-revisions.sql")),
+    M::up(include_str!("../migrations/0003-links.sql")),
 ];
+/// Schema version that introduced the `link` table; older databases need their links extracted.
+const LINKS_SCHEMA_VERSION: i64 = 3;
 const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
 
 /// Characters that would break the `[[Title|label]]` link syntax.
@@ -69,6 +74,23 @@ pub struct Page {
     pub updated_at: String,
 }
 
+/// A link from a page to a title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkTarget {
+    pub title: String,
+    /// True if no page has this title yet.
+    pub stub: bool,
+}
+
+/// The links around a page or stub.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Links {
+    /// Links in the page's current revision, in order of first appearance. Empty for a stub.
+    pub outgoing: Vec<LinkTarget>,
+    /// Titles of the pages linking here, sorted.
+    pub backlinks: Vec<String>,
+}
+
 /// The knowledge base, stored in a SQLite database.
 pub struct Knowledge {
     conn: Mutex<Connection>,
@@ -88,7 +110,12 @@ impl Knowledge {
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        let version_before: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         MIGRATIONS.to_latest(&mut conn)?;
+        if version_before < LINKS_SCHEMA_VERSION {
+            extract_all_links(&mut conn)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -111,7 +138,9 @@ impl Knowledge {
                     return Err(Error::PageNotFound(title.to_owned()));
                 }
                 tx.execute("INSERT INTO page (title) VALUES (?1)", [title])?;
-                insert_revision(&tx, tx.last_insert_rowid(), 1, body)?;
+                let page_id = tx.last_insert_rowid();
+                insert_revision(&tx, page_id, 1, body)?;
+                replace_links(&tx, page_id, body)?;
                 current_page(&tx, title)?.expect("page was just inserted")
             }
             Some((page_id, current)) => {
@@ -125,6 +154,7 @@ impl Knowledge {
                     return Ok(current);
                 }
                 insert_revision(&tx, page_id, current.revision + 1, body)?;
+                replace_links(&tx, page_id, body)?;
                 current_page(&tx, title)?.expect("page exists")
             }
         };
@@ -148,6 +178,36 @@ impl Knowledge {
             )
             .optional()?
             .map(|(_, page)| page))
+    }
+
+    /// Returns the links around a title, whether it is a page or a stub.
+    pub fn links(&self, title: &str) -> Result<Links> {
+        let conn = self.conn();
+        let title = title.trim();
+        let outgoing = conn
+            .prepare(
+                "SELECT l.target_title, NOT EXISTS (SELECT 1 FROM page t WHERE t.title = l.target_title) \
+                 FROM link l JOIN page p ON p.id = l.source_page_id \
+                 WHERE p.title = ?1 ORDER BY l.position",
+            )?
+            .query_map([title], |row| {
+                Ok(LinkTarget {
+                    title: row.get(0)?,
+                    stub: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let backlinks = conn
+            .prepare(
+                "SELECT p.title FROM link l JOIN page p ON p.id = l.source_page_id \
+                 WHERE l.target_title = ?1 ORDER BY p.title",
+            )?
+            .query_map([title], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Links {
+            outgoing,
+            backlinks,
+        })
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -192,6 +252,37 @@ fn current_page(conn: &Connection, title: &str) -> Result<Option<(i64, Page)>> {
             row_to_page,
         )
         .optional()?)
+}
+
+/// Replaces the page's links with those in `body`. A page never links to itself.
+fn replace_links(conn: &Connection, page_id: i64, body: &str) -> Result<()> {
+    conn.execute("DELETE FROM link WHERE source_page_id = ?1", [page_id])?;
+    let mut insert = conn.prepare(
+        "INSERT INTO link (source_page_id, target_title, position) \
+         SELECT ?1, ?2, ?3 WHERE ?2 <> (SELECT title FROM page WHERE id = ?1)",
+    )?;
+    for (position, target) in (0_i64..).zip(links::link_targets(body)) {
+        insert.execute(params![page_id, target, position])?;
+    }
+    Ok(())
+}
+
+/// Extracts the links of every page's current revision, for databases created before links
+/// existed.
+fn extract_all_links(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let pages: Vec<(i64, String)> = tx
+        .prepare(
+            "SELECT r.page_id, r.body FROM revision r \
+             WHERE r.number = (SELECT max(number) FROM revision WHERE page_id = r.page_id)",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (page_id, body) in pages {
+        replace_links(&tx, page_id, &body)?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn insert_revision(conn: &Connection, page_id: i64, number: u32, body: &str) -> Result<()> {
@@ -323,6 +414,104 @@ mod tests {
         assert_eq!(
             reopened.page("Caddy").unwrap().unwrap().body,
             "A reverse proxy."
+        );
+    }
+
+    fn target(title: &str, stub: bool) -> LinkTarget {
+        LinkTarget {
+            title: title.to_owned(),
+            stub,
+        }
+    }
+
+    #[test]
+    fn links_are_extracted_and_unwritten_titles_are_stubs() {
+        let knowledge = knowledge();
+        knowledge.write_page("Rust", "A language.", None).unwrap();
+        knowledge
+            .write_page(
+                "mnemograph",
+                "Written in [[Rust]], uses [[Tantivy|a search index]].",
+                None,
+            )
+            .unwrap();
+
+        let links = knowledge.links("mnemograph").unwrap();
+        assert_eq!(
+            links.outgoing,
+            [target("Rust", false), target("Tantivy", true)]
+        );
+        assert_eq!(knowledge.links("Rust").unwrap().backlinks, ["mnemograph"]);
+    }
+
+    #[test]
+    fn stub_has_backlinks_and_becomes_a_page_when_written() {
+        let knowledge = knowledge();
+        knowledge.write_page("A", "See [[Caddy]].", None).unwrap();
+        knowledge.write_page("B", "Also [[Caddy]].", None).unwrap();
+
+        let stub = knowledge.links("Caddy").unwrap();
+        assert!(stub.outgoing.is_empty());
+        assert_eq!(stub.backlinks, ["A", "B"]);
+
+        knowledge
+            .write_page("Caddy", "A reverse proxy.", None)
+            .unwrap();
+        assert_eq!(
+            knowledge.links("A").unwrap().outgoing,
+            [target("Caddy", false)]
+        );
+        assert_eq!(knowledge.links("Caddy").unwrap().backlinks, ["A", "B"]);
+    }
+
+    #[test]
+    fn new_revision_replaces_links() {
+        let knowledge = knowledge();
+        knowledge
+            .write_page("Page", "[[Old]] and [[Kept]]", None)
+            .unwrap();
+        knowledge
+            .write_page("Page", "[[Kept]] and [[New]]", Some(1))
+            .unwrap();
+
+        let titles: Vec<_> = knowledge
+            .links("Page")
+            .unwrap()
+            .outgoing
+            .into_iter()
+            .map(|l| l.title)
+            .collect();
+        assert_eq!(titles, ["Kept", "New"]);
+        assert!(knowledge.links("Old").unwrap().backlinks.is_empty());
+    }
+
+    #[test]
+    fn self_links_are_ignored() {
+        let knowledge = knowledge();
+        knowledge
+            .write_page("Rust", "[[Rust]] is [[Rust]].", None)
+            .unwrap();
+        assert_eq!(knowledge.links("Rust").unwrap(), Links::default());
+    }
+
+    #[test]
+    fn migration_extracts_links_of_existing_pages() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 2).unwrap();
+        conn.execute_batch(
+            "INSERT INTO page (id, title) VALUES (1, 'Old');
+             INSERT INTO revision (page_id, number, body) VALUES (1, 1, '[[Gone]]'), (1, 2, '[[Current]]');",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        conn.backup(rusqlite::MAIN_DB, &path, None).unwrap();
+        drop(conn);
+
+        let knowledge = Knowledge::open(&path).unwrap();
+        assert_eq!(
+            knowledge.links("Old").unwrap().outgoing,
+            [target("Current", true)]
         );
     }
 

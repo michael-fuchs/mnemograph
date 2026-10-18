@@ -11,7 +11,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub use mcp::{McpServer, PageView};
+pub use mcp::{LinkView, McpServer, PageView};
 
 /// Builds the HTTP application: `/health` and the MCP endpoint at `/mcp`.
 ///

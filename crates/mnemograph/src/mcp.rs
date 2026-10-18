@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mnemograph_core::{Knowledge, Page};
+use mnemograph_core::{Knowledge, Links, Page};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -33,16 +33,37 @@ pub struct PageView {
     pub revision: u32,
     pub created_at: String,
     pub updated_at: String,
+    /// Titles this page links to, in order of appearance.
+    pub links: Vec<LinkView>,
+    /// Titles of the pages linking to this page.
+    pub backlinks: Vec<String>,
 }
 
-impl From<Page> for PageView {
-    fn from(page: Page) -> Self {
+/// A link from a page to a title.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LinkView {
+    pub title: String,
+    /// True if no page has this title yet; writing a page with this title fills the stub.
+    pub stub: bool,
+}
+
+impl PageView {
+    fn new(page: Page, links: Links) -> Self {
         Self {
             title: page.title,
             body: page.body,
             revision: page.revision,
             created_at: page.created_at,
             updated_at: page.updated_at,
+            links: links
+                .outgoing
+                .into_iter()
+                .map(|link| LinkView {
+                    title: link.title,
+                    stub: link.stub,
+                })
+                .collect(),
+            backlinks: links.backlinks,
         }
     }
 }
@@ -51,7 +72,8 @@ impl From<Page> for PageView {
 pub struct WritePageArgs {
     /// Title of the page: the name of its subject, e.g. "Rauthy". Must not contain [ ] | or line breaks.
     pub title: String,
-    /// The complete new Markdown body of the page (not a diff).
+    /// The complete new Markdown body of the page (not a diff). Link to other pages with
+    /// [[Title]] or [[Title|label]].
     pub body: String,
     /// Required to change an existing page: the revision your new body is based on, as returned
     /// by read_page. Omit it only to create a new page.
@@ -82,25 +104,37 @@ impl McpServer {
         Parameters(args): Parameters<WritePageArgs>,
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
-        blocking(move || knowledge.write_page(&args.title, &args.body, args.base_revision))
-            .await
-            .map(|page| rmcp::Json(page.into()))
+        blocking(move || {
+            let page = knowledge.write_page(&args.title, &args.body, args.base_revision)?;
+            let links = knowledge.links(&page.title)?;
+            Ok(PageView::new(page, links))
+        })
+        .await
+        .map(rmcp::Json)
     }
 
-    #[tool(description = "Read a page by its title.")]
+    #[tool(
+        description = "Read a page by its title, with the titles it links to and the pages linking to it."
+    )]
     async fn read_page(
         &self,
         Parameters(args): Parameters<ReadPageArgs>,
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
         let title = args.title;
-        let page = blocking({
+        let (page, links) = blocking({
             let title = title.clone();
-            move || knowledge.page(&title)
+            move || Ok((knowledge.page(&title)?, knowledge.links(&title)?))
         })
         .await?;
-        page.map(|page| rmcp::Json(page.into()))
-            .ok_or_else(|| format!("no page titled {title:?}"))
+        match page {
+            Some(page) => Ok(rmcp::Json(PageView::new(page, links))),
+            None if links.backlinks.is_empty() => Err(format!("no page titled {title:?}")),
+            None => Err(format!(
+                "no page titled {title:?} yet; it is a stub linked from: {}. Create it with write_page.",
+                links.backlinks.join(", ")
+            )),
+        }
     }
 }
 
@@ -117,8 +151,11 @@ impl ServerHandler for McpServer {
 fn agent_message(err: mnemograph_core::Error) -> String {
     match err {
         mnemograph_core::Error::Conflict { ref current, .. } => {
-            let current = serde_json::to_string(&PageView::from((**current).clone()))
-                .expect("PageView serializes");
+            let current = serde_json::json!({
+                "title": current.title,
+                "revision": current.revision,
+                "body": current.body,
+            });
             format!("{err}. Current revision: {current}")
         }
         mnemograph_core::Error::Storage(_) | mnemograph_core::Error::Migration(_) => {

@@ -7,9 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+comrak = { version = "0.56.0", default-features = false }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["backup"] }
 tempfile.workspace = true
