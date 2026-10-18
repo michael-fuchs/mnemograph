@@ -1,5 +1,7 @@
 # Plan: Rust Wiki &amp; Agent Memory with LadybugDB
 
+> **Superseded in part by [`mnemograph-v1.md`](mnemograph-v1.md) (2026-10-18).** Where they disagree, v1 wins: pages and entities are unified (ADR 0001), agents use authorization code with pre-registered clients instead of client credentials (ADR 0002), and storage is SQLite + Tantivy instead of LadybugDB (ADR 0003). This document is kept for its background and deferred ideas.
+
 **Project name:** `mnemograph`  
 **Goal:** A lean, self-hosted knowledge base for personal AI projects — serving as a human-readable wiki *and* a machine-readable agent memory in a single binary.
 

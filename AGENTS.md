@@ -4,27 +4,28 @@ A lean, self-hosted knowledge base that is both a human-readable wiki and a mach
 
 ## Status
 
-Planning phase — no code yet. The current concept is `docs/plans/mnemograph-initial.md` (draft, not final). `Scratch.md` is a free-form notes file. When ideas are refined, update or add plan documents under `docs/plans/` rather than scattering decisions elsewhere.
+Planning phase — no code yet. The current plan is `docs/plans/mnemograph-v1.md`; it supersedes `docs/plans/mnemograph-initial.md` where they disagree (the initial plan remains as background). Vocabulary is in `GLOSSARY.md`, decisions with trade-offs in `docs/adr/`, and sourced library facts in `docs/research/`. `Scratch.md` is a private, git-ignored notes file. When ideas are refined, update the plan documents under `docs/plans/` rather than scattering decisions elsewhere.
 
-## Intended architecture (from the initial plan)
+## Intended architecture (v1)
 
-- **Single binary:** axum HTTP server + server-rendered web UI (askama + htmx) + MCP server (`rmcp`, Streamable HTTP at `/mcp`) + embedded LadybugDB (`lbug` crate) for graph, full-text and later vector search. No separate DB process.
-- **Documents + graph on the same data:** documents (Markdown body + YAML frontmatter) and entities/relations (`DOCUMENT`, `ENTITY`, `TAG`, `SOURCE`; edges `MENTIONS`, `RELATED_TO` with a `relation` property, `DESCRIBES`, `HAS_TAG`, `CITED_BY`).
-- **"mnemograph-flavored" Markdown** (Comrak): `[[Wikilinks]]` create `MENTIONS` edges, `[[Entity|relation]]` creates typed relations, callouts, Mermaid, tables/task lists/footnotes.
-- **Agent-first:** agents are the primary users via MCP; the web UI is for the owner to browse and curate.
-- **Auth:** Rauthy as OIDC IdP (separate container, provided by `../server-infra`). Browser uses Authorization Code flow; each agent gets its own client-credentials client so it can be revoked individually. JWTs validated locally via JWKS.
-- **Planned Cargo workspace:** `mnemograph-core` (domain), `mnemograph-store` (LadybugDB adapter, Cypher migrations), `mnemograph-mcp` (MCP tools), `mnemograph-web` (axum/UI/OIDC; the binary).
+- **Single binary:** axum HTTP server + read-only web UI (askama + Datastar) + MCP server (`rmcp`, Streamable HTTP at `/mcp`) + CLI (`serve`, `export`, `delete`, `reindex`).
+- **Storage:** SQLite (`rusqlite`, bundled) is the only source of truth; Tantivy is a derived, rebuildable full-text index with German and English stemming (ADR 0003).
+- **Domain:** pages (no separate entities, ADR 0001) with titles, aliases, optional page type and Markdown body; untyped `[[Title|label]]` links; implicit stubs; append-only notes; revisions with authors.
+- **Auth:** Rauthy as OIDC provider (local docker-compose here; production instance owned by `../server-infra`). Agents use authorization code + PKCE with one pre-registered client per installation; mnemograph validates JWTs itself and serves Protected Resource Metadata (ADR 0002).
+- **Cargo workspace:** `mnemograph-core` (domain + storage) and `mnemograph` (binary).
 
 ## Design constraints to preserve
 
-- Agents never delete; deletion is web-UI-only by the owner.
-- No free-form Cypher from agents — `query_graph` only exposes a whitelist of read-only query templates.
-- Keep the MCP tool surface small; no feature creep toward a Notion/Outline clone.
-- Data must stay exportable (Cypher/Parquet export, optional Markdown/git mirror).
+- Agents never delete; deletion is owner-only (CLI in v1).
+- Every revision and note records its author from the token, never from request content.
+- No free-form query language exposed to agents.
+- Keep the MCP tool surface small (v1: `search`, `read_page`, `write_page`, `add_note`, `related`); no feature creep toward a Notion/Outline clone.
+- Data must stay exportable (`mnemograph export`), and search indexes must always be rebuildable from SQLite.
+- This repo is public: describe infrastructure requirements generically; hostnames, IPs and client IDs belong in `../server-infra`.
 
 ## Open decisions
 
-See §9 of the initial plan (Vibe MCP integration, wikilink vs. LLM extraction, Markdown mirror, coexistence with Outline).
+Deferred items are listed at the end of `docs/plans/mnemograph-v1.md`.
 
 ## Agent skills
 
