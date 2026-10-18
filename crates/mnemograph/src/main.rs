@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
@@ -34,6 +34,14 @@ enum Command {
         )]
         page_types: Vec<String>,
     },
+    /// Export all pages (as Markdown files) and notes (as JSONL) into a new directory.
+    Export {
+        /// Directory to write into; must not exist yet or be empty.
+        dir: PathBuf,
+        /// Path of the SQLite database.
+        #[arg(long, env = "MNEMOGRAPH_DB", default_value = "mnemograph.db")]
+        db: PathBuf,
+    },
     /// Rebuild the search index from the database.
     Reindex {
         /// Path of the SQLite database.
@@ -56,14 +64,30 @@ async fn main() -> anyhow::Result<()> {
             listen,
             page_types,
         } => serve(db, listen, page_types).await,
+        Command::Export { dir, db } => export(db, dir),
         Command::Reindex { db } => reindex(db),
     }
 }
 
-fn reindex(db: PathBuf) -> anyhow::Result<()> {
+/// Opens an existing database; unlike `serve`, the CLI commands never create one.
+fn open_existing(db: &Path) -> anyhow::Result<Knowledge> {
     anyhow::ensure!(db.exists(), "database {} does not exist", db.display());
-    let knowledge =
-        Knowledge::open(&db).with_context(|| format!("opening database {}", db.display()))?;
+    Knowledge::open(db).with_context(|| format!("opening database {}", db.display()))
+}
+
+fn export(db: PathBuf, dir: PathBuf) -> anyhow::Result<()> {
+    let summary = open_existing(&db)?.export(&dir)?;
+    println!(
+        "exported to {}: pages: {}, notes: {}",
+        dir.display(),
+        summary.pages,
+        summary.notes
+    );
+    Ok(())
+}
+
+fn reindex(db: PathBuf) -> anyhow::Result<()> {
+    let knowledge = open_existing(&db)?;
     knowledge.rebuild_search_index()?;
     tracing::info!(db = %db.display(), "search index rebuilt");
     Ok(())

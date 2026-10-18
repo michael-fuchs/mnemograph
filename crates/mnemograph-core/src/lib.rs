@@ -4,6 +4,7 @@
 //! source of truth (ADR 0003). The API is synchronous; async callers should run it on a
 //! blocking thread.
 
+mod export;
 mod links;
 mod notes;
 mod related;
@@ -16,6 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{MAX_HOPS, Related};
 
@@ -53,6 +55,10 @@ pub enum Error {
     UnknownPageType { given: String, allowed: Vec<String> },
     #[error("a note must not be empty")]
     EmptyNote,
+    #[error("the export directory {0} is not empty")]
+    ExportTargetNotEmpty(String),
+    #[error("file error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("database migration failed: {0}")]
@@ -390,6 +396,25 @@ impl Knowledge {
             Some(page_id) => Ok(Some(current_page(&conn, page_id)?)),
             None => Ok(None),
         }
+    }
+
+    /// Returns the current revision of every page, sorted by title.
+    pub fn pages(&self) -> Result<Vec<Page>> {
+        let mut pages = self.pages_in_creation_order()?;
+        pages.sort_by_cached_key(|page| page.title.to_lowercase());
+        Ok(pages)
+    }
+
+    /// Returns the current revision of every page, oldest page first.
+    pub(crate) fn pages_in_creation_order(&self) -> Result<Vec<Page>> {
+        Ok(self
+            .conn()
+            .prepare(&format!(
+                "{PAGE_SELECT} WHERE r.number = \
+                 (SELECT max(number) FROM revision WHERE page_id = p.id) ORDER BY p.id"
+            ))?
+            .query_map([], row_to_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Returns a specific revision of the page with this title or alias, if both exist.

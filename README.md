@@ -18,7 +18,7 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
 | `--page-types` | `MNEMOGRAPH_PAGE_TYPES` | `project,technology,decision,person,tool,concept` |
 
-`cargo run -- reindex` rebuilds the search index on demand.
+`cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`.
 
 There is no authentication yet, so the server refuses to listen on anything but a loopback address.
 

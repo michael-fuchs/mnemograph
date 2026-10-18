@@ -55,6 +55,16 @@ impl Knowledge {
         Ok(note)
     }
 
+    /// Returns all notes, oldest first.
+    pub fn notes(&self) -> Result<Vec<Note>> {
+        let conn = self.conn();
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM note ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.into_iter().map(|id| note(&conn, id)).collect()
+    }
+
     /// Returns the most recent notes linking to this title or alias (of a page or a stub),
     /// newest first.
     pub fn notes_about(&self, title: &str, limit: u32) -> Result<Vec<Note>> {

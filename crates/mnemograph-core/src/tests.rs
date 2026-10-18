@@ -968,3 +968,67 @@ fn snippets_of_long_texts_are_cut_around_the_match() {
     );
     assert!(snippet.chars().count() < 260, "{snippet}");
 }
+
+// Export
+
+#[test]
+fn export_writes_pages_as_markdown_and_notes_as_jsonl() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rauthy (IdP)",
+            "An OIDC provider.\n\nSee [[Rust]].",
+            None,
+            PageChanges {
+                page_type: Some(Some("tool".into())),
+                aliases: Some(vec!["Rauthy".into(), "Say \"hi\"".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    create(&knowledge, "C++", "no type, no aliases");
+    create(&knowledge, "C#", "collides with C++");
+    knowledge.add_note("Decided on [[Rauthy]].").unwrap();
+    knowledge.add_note("Second\nline").unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("export");
+    let summary = knowledge.export(&target).unwrap();
+    assert_eq!(summary, ExportSummary { pages: 3, notes: 2 });
+
+    let rauthy = std::fs::read_to_string(target.join("pages/Rauthy-IdP.md")).unwrap();
+    assert!(rauthy.starts_with(
+        "---\ntitle: \"Rauthy (IdP)\"\ntype: \"tool\"\naliases: [\"Rauthy\",\"Say \\\"hi\\\"\"]\nrevision: 1\n"
+    ), "{rauthy}");
+    assert!(
+        rauthy.ends_with("---\n\nAn OIDC provider.\n\nSee [[Rust]].\n"),
+        "{rauthy}"
+    );
+
+    let c = std::fs::read_to_string(target.join("pages/C.md")).unwrap();
+    assert!(c.starts_with("---\ntitle: \"C++\"\nrevision: 1\n"), "{c}");
+    assert!(target.join("pages/C-2.md").exists());
+
+    let notes = std::fs::read_to_string(target.join("notes.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = notes
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["body"], "Decided on [[Rauthy]].");
+    assert_eq!(lines[0]["links"], serde_json::json!(["Rauthy"]));
+    assert_eq!(lines[1]["body"], "Second\nline");
+    assert!(lines[1]["created_at"].as_str().unwrap().ends_with('Z'));
+}
+
+#[test]
+fn export_refuses_a_non_empty_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("keep.txt"), "mine").unwrap();
+    let err = knowledge().export(dir.path()).unwrap_err();
+    assert!(matches!(err, Error::ExportTargetNotEmpty(_)));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+        "mine"
+    );
+}
