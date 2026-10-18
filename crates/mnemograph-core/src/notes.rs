@@ -1,9 +1,12 @@
 //! Notes: short, timestamped, append-only entries that link to the pages they concern.
 
-use rusqlite::{Connection, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
+use crate::search::{IndexedText, Item};
 use crate::title::title_key;
-use crate::{Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, links, names};
+use crate::{
+    Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, increase_change_counter, links, names,
+};
 
 /// A short, timestamped, append-only entry recording something worth remembering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +37,21 @@ impl Knowledge {
             insert.execute(params![note_id, target, title_key(&target), position])?;
         }
         drop(insert);
+        increase_change_counter(&tx)?;
         let note = note(&tx, note_id)?;
         tx.commit()?;
+        self.index_after_commit(
+            &conn,
+            &[(
+                Item::Note(note_id),
+                Some(IndexedText {
+                    item: Item::Note(note_id),
+                    names: &[],
+                    page_type: None,
+                    body: &note.body,
+                }),
+            )],
+        );
         Ok(note)
     }
 
@@ -54,6 +70,14 @@ impl Knowledge {
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter().map(|id| note(&conn, id)).collect()
     }
+}
+
+/// Returns the note with this ID, if it exists.
+pub(crate) fn find_note(conn: &Connection, note_id: i64) -> Result<Option<Note>> {
+    let exists = conn
+        .query_row("SELECT 1 FROM note WHERE id = ?1", [note_id], |_| Ok(()))
+        .optional()?;
+    exists.map(|()| note(conn, note_id)).transpose()
 }
 
 fn note(conn: &Connection, note_id: i64) -> Result<Note> {

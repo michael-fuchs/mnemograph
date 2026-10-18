@@ -8,6 +8,7 @@ mod links;
 mod notes;
 mod related;
 mod schema;
+mod search;
 mod title;
 
 use std::path::Path;
@@ -17,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 pub use notes::Note;
 pub use related::{MAX_HOPS, Related};
+
+use search::{IndexedText, Item, SearchIndex};
 use title::{clean_title, title_key};
 
 /// Page types allowed when none are configured.
@@ -54,6 +57,8 @@ pub enum Error {
     Storage(#[from] rusqlite::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] rusqlite_migration::Error),
+    #[error("search index error: {0}")]
+    Search(#[from] tantivy::TantivyError),
 }
 
 fn conflict_message(base: &Option<u32>, current: &Page) -> String {
@@ -125,31 +130,150 @@ pub struct Links {
     pub backlinks: Vec<String>,
 }
 
-/// The knowledge base, stored in a SQLite database.
+/// Something a search found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub found: Found,
+    /// The matching part of the text, with matched words in **bold**.
+    pub snippet: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    Page {
+        title: String,
+        page_type: Option<String>,
+    },
+    Note(Note),
+}
+
+/// The knowledge base, stored in a SQLite database with a derived search index.
 pub struct Knowledge {
     conn: Mutex<Connection>,
+    search: SearchIndex,
     page_types: Vec<String>,
 }
 
 impl Knowledge {
-    /// Opens (or creates) the database at `path` and migrates it to the latest schema.
+    /// Opens (or creates) the database at `path` and migrates it to the latest schema. The
+    /// search index lives next to it in `<path>.search/` and is rebuilt if it is missing or
+    /// outdated.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        let path = path.as_ref();
+        let mut index_dir = path.as_os_str().to_owned();
+        index_dir.push(".search");
+        Self::init(
+            Connection::open(path)?,
+            SearchIndex::open(Path::new(&index_dir))?,
+        )
     }
 
     /// Opens a fresh in-memory database, mainly for tests.
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, SearchIndex::in_memory()?)
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection, search: SearchIndex) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         schema::migrations().to_latest(&mut conn)?;
-        Ok(Self {
+        let knowledge = Self {
             conn: Mutex::new(conn),
+            search,
             page_types: DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string()).collect(),
-        })
+        };
+        let counter = change_counter(&knowledge.conn())?;
+        if knowledge.search.change_counter() != Some(counter) {
+            tracing::info!("search index is missing or outdated; rebuilding it");
+            knowledge.rebuild_search_index()?;
+        }
+        Ok(knowledge)
+    }
+
+    /// Rebuilds the search index from the database.
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        let conn = self.conn();
+        let pages: Vec<(i64, Page)> = conn
+            .prepare(&format!(
+                "{PAGE_SELECT_WITH_ID} WHERE r.number = \
+                 (SELECT max(number) FROM revision WHERE page_id = p.id)"
+            ))?
+            .query_map([], |row| Ok((row.get(0)?, row_to_page_from(row, 1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let notes: Vec<(i64, String)> = conn
+            .prepare("SELECT id, body FROM note")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let names: Vec<Vec<&str>> = pages.iter().map(|(_, page)| page_names(page)).collect();
+        let texts = pages
+            .iter()
+            .zip(&names)
+            .map(|((id, page), names)| IndexedText {
+                item: Item::Page(*id),
+                names,
+                page_type: page.page_type.as_deref(),
+                body: &page.body,
+            })
+            .chain(notes.iter().map(|(id, body)| IndexedText {
+                item: Item::Note(*id),
+                names: &[],
+                page_type: None,
+                body,
+            }));
+        self.search.rebuild(texts, change_counter(&conn)?)?;
+        Ok(())
+    }
+
+    /// Searches pages and notes by full text, best matches first. With `page_type`, only pages
+    /// of that type are searched.
+    pub fn search(
+        &self,
+        query: &str,
+        page_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let page_type = self.check_page_type(page_type.map(str::to_owned))?;
+        let hits = self.search.search(query, page_type.as_deref(), limit)?;
+        let conn = self.conn();
+        let mut found = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let item = match hit.item {
+                Item::Page(id) => conn
+                    .query_row(
+                        "SELECT title, page_type FROM page WHERE id = ?1",
+                        [id],
+                        |row| {
+                            Ok(Found::Page {
+                                title: row.get(0)?,
+                                page_type: row.get(1)?,
+                            })
+                        },
+                    )
+                    .optional()?,
+                Item::Note(id) => notes::find_note(&conn, id)?.map(Found::Note),
+            };
+            // A hit without a row means the index is ahead of a deletion; skip it.
+            if let Some(item) = item {
+                found.push(SearchHit {
+                    found: item,
+                    snippet: hit.snippet,
+                    score: hit.score,
+                });
+            }
+        }
+        Ok(found)
+    }
+
+    /// Updates the search index after a committed write, while the caller still holds the
+    /// database lock so index commits happen in the same order as database commits. A failure
+    /// leaves the index outdated, which the next start detects and repairs.
+    fn index_after_commit(&self, conn: &Connection, texts: &[(Item, Option<IndexedText<'_>>)]) {
+        let result =
+            change_counter(conn).and_then(|counter| Ok(self.search.update(texts, counter)?));
+        if let Err(err) = result {
+            tracing::warn!(%err, "updating the search index failed; it will be rebuilt on the next start");
+        }
     }
 
     /// Replaces the allowed page types. Types are compared case-insensitively.
@@ -241,8 +365,21 @@ impl Knowledge {
         };
 
         next.store(&tx, page_id)?;
+        increase_change_counter(&tx)?;
         let page = current_page(&tx, page_id)?;
         tx.commit()?;
+        self.index_after_commit(
+            &conn,
+            &[(
+                Item::Page(page_id),
+                Some(IndexedText {
+                    item: Item::Page(page_id),
+                    names: &page_names(&page),
+                    page_type: page.page_type.as_deref(),
+                    body: &page.body,
+                }),
+            )],
+        );
         Ok(page)
     }
 
@@ -460,23 +597,55 @@ impl Snapshot {
     }
 }
 
+/// The page's title followed by its aliases.
+fn page_names(page: &Page) -> Vec<&str> {
+    std::iter::once(page.title.as_str())
+        .chain(page.aliases.iter().map(String::as_str))
+        .collect()
+}
+
+fn change_counter(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT value FROM meta WHERE key = 'change_counter'",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Every write transaction calls this, so the search index can tell whether it missed one.
+fn increase_change_counter(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE meta SET value = value + 1 WHERE key = 'change_counter'",
+        [],
+    )?;
+    Ok(())
+}
+
+const PAGE_SELECT_WITH_ID: &str = "SELECT p.id, r.title, r.page_type, r.aliases, r.body, \
+     r.number, p.created_at, r.created_at FROM page p JOIN revision r ON r.page_id = p.id";
+
 const PAGE_SELECT: &str = "SELECT r.title, r.page_type, r.aliases, r.body, r.number, \
      p.created_at, r.created_at FROM page p JOIN revision r ON r.page_id = p.id";
 
 fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
-    let aliases: String = row.get(2)?;
+    row_to_page_from(row, 0)
+}
+
+/// Reads a page from the columns of [`PAGE_SELECT`], starting at column `first`.
+fn row_to_page_from(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Page> {
+    let aliases: String = row.get(first + 2)?;
     Ok(Page {
-        title: row.get(0)?,
-        page_type: row.get(1)?,
+        title: row.get(first)?,
+        page_type: row.get(first + 1)?,
         aliases: aliases
             .split('\n')
             .filter(|a| !a.is_empty())
             .map(str::to_owned)
             .collect(),
-        body: row.get(3)?,
-        revision: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        body: row.get(first + 3)?,
+        revision: row.get(first + 4)?,
+        created_at: row.get(first + 5)?,
+        updated_at: row.get(first + 6)?,
     })
 }
 

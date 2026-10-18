@@ -104,7 +104,10 @@ async fn server_lists_its_tools_and_instructions() {
     let tools = server.client.list_all_tools().await.unwrap();
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, ["add_note", "read_page", "related", "write_page"]);
+    assert_eq!(
+        names,
+        ["add_note", "read_page", "related", "search", "write_page"]
+    );
 
     let info = server.client.peer_info().expect("server info");
     assert!(
@@ -428,4 +431,50 @@ async fn related_of_an_unknown_title_is_a_tool_error() {
     let server = TestServer::start().await;
     let result = server.call("related", json!({ "title": "Nothing" })).await;
     assert!(error_text(&result).contains("no page titled"));
+}
+
+#[tokio::test]
+async fn search_finds_pages_and_notes_with_snippets() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Speicher", "body": "Wir vergleichen Datenbanken.", "page_type": "decision" }),
+        )
+        .await;
+    server
+        .call(
+            "add_note",
+            json!({ "body": "Die Datenbank läuft in [[Speicher]]." }),
+        )
+        .await;
+
+    let all = server.call("search", json!({ "query": "datenbank" })).await;
+    let hits = structured(&all)["hits"].as_array().unwrap().clone();
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    let kinds: Vec<_> = hits.iter().map(|h| h["kind"].as_str().unwrap()).collect();
+    assert!(
+        kinds.contains(&"page") && kinds.contains(&"note"),
+        "{kinds:?}"
+    );
+    assert!(
+        hits.iter()
+            .all(|h| h["snippet"].as_str().unwrap().contains("**"))
+    );
+
+    let decisions = server
+        .call(
+            "search",
+            json!({ "query": "datenbank", "page_type": "decision" }),
+        )
+        .await;
+    assert_eq!(
+        structured(&decisions)["hits"],
+        json!([{
+            "kind": "page",
+            "title": "Speicher",
+            "page_type": "decision",
+            "snippet": "Wir vergleichen **Datenbanken**."
+        }])
+    );
 }

@@ -792,3 +792,179 @@ fn a_page_without_links_has_no_related_pages() {
     create(&knowledge, "Alone", "");
     assert!(knowledge.related("Alone", 3, 100).unwrap().is_empty());
 }
+
+// Search
+
+fn found_titles(hits: &[SearchHit]) -> Vec<String> {
+    hits.iter()
+        .map(|hit| match &hit.found {
+            Found::Page { title, .. } => title.clone(),
+            Found::Note(note) => format!("note {}", note.id),
+        })
+        .collect()
+}
+
+fn search(knowledge: &Knowledge, query: &str) -> Vec<String> {
+    found_titles(&knowledge.search(query, None, 10).unwrap())
+}
+
+#[test]
+fn search_stems_german_and_english() {
+    let knowledge = knowledge();
+    create(
+        &knowledge,
+        "Speicher",
+        "Wir vergleichen mehrere Datenbanken.",
+    );
+    create(
+        &knowledge,
+        "Storage",
+        "Comparing several databases and indexes.",
+    );
+
+    assert_eq!(search(&knowledge, "Datenbank"), ["Speicher"]);
+    assert_eq!(search(&knowledge, "database"), ["Storage"]);
+    assert_eq!(search(&knowledge, "compared"), ["Storage"]);
+}
+
+#[test]
+fn search_finds_titles_aliases_and_notes() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rauthy",
+            "An identity provider.",
+            None,
+            PageChanges {
+                aliases: Some(vec!["IdP".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let note = knowledge
+        .add_note("Decided on [[Caddy]] because of automatic certificates.")
+        .unwrap();
+
+    assert_eq!(search(&knowledge, "rauthy"), ["Rauthy"]);
+    assert_eq!(search(&knowledge, "idp"), ["Rauthy"]);
+    let hits = knowledge.search("certificate", None, 10).unwrap();
+    assert_eq!(found_titles(&hits), [format!("note {}", note.id)]);
+    assert!(
+        hits[0].snippet.contains("**certificates**"),
+        "{}",
+        hits[0].snippet
+    );
+}
+
+#[test]
+fn search_reflects_the_current_revision_and_renames() {
+    let knowledge = knowledge();
+    create(&knowledge, "Proxy", "We use Traefik.");
+    knowledge
+        .write_page(
+            "Proxy",
+            "We use Caddy.",
+            Some(1),
+            PageChanges {
+                new_title: Some("Reverse proxy".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(search(&knowledge, "traefik").is_empty());
+    assert_eq!(search(&knowledge, "caddy"), ["Reverse proxy"]);
+}
+
+#[test]
+fn search_filters_by_page_type_and_rejects_unknown_types() {
+    let knowledge = knowledge();
+    let typed = |title: &str, page_type: &str| {
+        knowledge
+            .write_page(
+                title,
+                "About Rust.",
+                None,
+                PageChanges {
+                    page_type: Some(Some(page_type.into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    };
+    typed("Rust", "technology");
+    typed("Use Rust", "decision");
+    knowledge.add_note("Rust note").unwrap();
+
+    let hits = knowledge.search("rust", Some("Decision"), 10).unwrap();
+    assert_eq!(found_titles(&hits), ["Use Rust"]);
+    assert!(matches!(
+        knowledge.search("rust", Some("crate"), 10),
+        Err(Error::UnknownPageType { .. })
+    ));
+}
+
+#[test]
+fn search_tolerates_query_syntax_errors() {
+    let knowledge = knowledge();
+    create(&knowledge, "Rust", "A language.");
+    assert_eq!(search(&knowledge, "rust AND ("), ["Rust"]);
+    assert!(search(&knowledge, "").is_empty());
+}
+
+#[test]
+fn a_missing_search_index_is_rebuilt_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb.db");
+    create(&Knowledge::open(&path).unwrap(), "Rust", "A language.");
+    std::fs::remove_dir_all(dir.path().join("kb.db.search")).unwrap();
+
+    assert_eq!(
+        search(&Knowledge::open(&path).unwrap(), "language"),
+        ["Rust"]
+    );
+}
+
+#[test]
+fn a_write_the_index_missed_is_detected_and_repaired_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb.db");
+    create(&Knowledge::open(&path).unwrap(), "Rust", "A language.");
+
+    // Simulate a crash between the database commit and the index update.
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO note (body) VALUES ('Missed by the index');
+         UPDATE meta SET value = value + 1 WHERE key = 'change_counter';",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(search(&Knowledge::open(&path).unwrap(), "missed").len(), 1);
+}
+
+#[test]
+fn rebuild_search_index_restores_all_content() {
+    let knowledge = knowledge();
+    create(&knowledge, "Rust", "A language.");
+    knowledge.add_note("A note about [[Rust]].").unwrap();
+    knowledge.rebuild_search_index().unwrap();
+    assert_eq!(search(&knowledge, "rust").len(), 2);
+}
+
+#[test]
+fn snippets_of_long_texts_are_cut_around_the_match() {
+    let knowledge = knowledge();
+    let body = format!(
+        "{} The decisive word is Tantivy. {}",
+        "Filler text. ".repeat(40),
+        "More filler. ".repeat(40)
+    );
+    create(&knowledge, "Long", &body);
+    let snippet = &knowledge.search("tantivy", None, 1).unwrap()[0].snippet;
+    assert!(snippet.contains("**Tantivy**"), "{snippet}");
+    assert!(
+        snippet.starts_with('…') && snippet.ends_with('…'),
+        "{snippet}"
+    );
+    assert!(snippet.chars().count() < 260, "{snippet}");
+}

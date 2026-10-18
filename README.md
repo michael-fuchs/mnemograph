@@ -10,13 +10,15 @@ A lean, self-hosted knowledge base that is both a human-readable wiki and a long
 cargo run -- serve
 ```
 
-This creates `mnemograph.db` in the current directory and listens on `http://127.0.0.1:8080`. Options (also settable via environment):
+This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search index, rebuilt from the data whenever it is missing or outdated) in the current directory and listens on `http://127.0.0.1:8080`. Options (also settable via environment):
 
 | Option     | Environment         | Default          |
 | ---------- | ------------------- | ---------------- |
 | `--db`     | `MNEMOGRAPH_DB`     | `mnemograph.db`  |
 | `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
 | `--page-types` | `MNEMOGRAPH_PAGE_TYPES` | `project,technology,decision,person,tool,concept` |
+
+`cargo run -- reindex` rebuilds the search index on demand.
 
 There is no authentication yet, so the server refuses to listen on anything but a loopback address.
 
@@ -30,6 +32,7 @@ Claude Code then has these tools:
 
 - `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, or a new title (the old title stays an alias). `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
 - `read_page`: read a page by title or alias, with its current revision, the titles it links to, the pages linking to it and its most recent notes.
+- `search`: full-text search over pages and notes, understanding German and English word forms, optionally limited to one page type; hits come with a snippet.
 - `related`: the pages and stubs within 1–3 links of a page (default 2), following links in both directions, nearest first.
 - `add_note`: record a short, timestamped, append-only note; its `[[links]]` attach it to the pages (or stubs) it concerns.
 
