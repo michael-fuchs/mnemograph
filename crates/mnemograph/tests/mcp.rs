@@ -187,3 +187,56 @@ async fn stale_base_revision_is_rejected_with_the_current_revision() {
     let read = server.call("read_page", json!({ "title": "Caddy" })).await;
     assert_eq!(structured(&read)["body"], "v2 by agent A");
 }
+
+#[tokio::test]
+async fn read_page_shows_links_stubs_and_backlinks() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Rust", "body": "A language." }),
+        )
+        .await;
+    let written = server
+        .call(
+            "write_page",
+            json!({ "title": "mnemograph", "body": "Uses [[Rust]] and [[Tantivy|a search index]]." }),
+        )
+        .await;
+    assert_eq!(
+        structured(&written)["links"],
+        json!([{ "title": "Rust", "stub": false }, { "title": "Tantivy", "stub": true }])
+    );
+
+    let rust = server.call("read_page", json!({ "title": "Rust" })).await;
+    assert_eq!(structured(&rust)["backlinks"], json!(["mnemograph"]));
+}
+
+#[tokio::test]
+async fn reading_a_stub_names_the_linking_pages_until_it_is_written() {
+    let server = TestServer::start().await;
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Notes", "body": "See [[Caddy]]." }),
+        )
+        .await;
+
+    let result = server.call("read_page", json!({ "title": "Caddy" })).await;
+    let error = error_text(&result);
+    assert!(error.contains("stub linked from: Notes"), "{error}");
+
+    server
+        .call(
+            "write_page",
+            json!({ "title": "Caddy", "body": "A reverse proxy." }),
+        )
+        .await;
+    let caddy = server.call("read_page", json!({ "title": "Caddy" })).await;
+    assert_eq!(structured(&caddy)["backlinks"], json!(["Notes"]));
+    let notes = server.call("read_page", json!({ "title": "Notes" })).await;
+    assert_eq!(
+        structured(&notes)["links"],
+        json!([{ "title": "Caddy", "stub": false }])
+    );
+}
