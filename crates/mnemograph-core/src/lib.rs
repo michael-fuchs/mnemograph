@@ -4,6 +4,7 @@
 //! source of truth (ADR 0003). The API is synchronous; async callers should run it on a
 //! blocking thread.
 
+mod author;
 mod delete;
 mod export;
 mod links;
@@ -18,6 +19,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub use author::Author;
 pub use delete::DeletedPage;
 pub use export::ExportSummary;
 pub use notes::Note;
@@ -105,6 +107,8 @@ pub struct Page {
     pub created_at: String,
     /// When this revision was created, as an RFC 3339 timestamp (UTC).
     pub updated_at: String,
+    /// Who created this revision; `None` for revisions from before authors were recorded.
+    pub author: Option<Author>,
 }
 
 /// What a write changes besides the body. `None` fields keep their current value (for a new
@@ -321,6 +325,7 @@ impl Knowledge {
         body: &str,
         base_revision: Option<u32>,
         changes: PageChanges,
+        author: &Author,
     ) -> Result<Page> {
         let title = clean_title(title)?;
         let page_type = match changes.page_type {
@@ -382,7 +387,7 @@ impl Knowledge {
             }
         };
 
-        next.store(&tx, page_id)?;
+        next.store(&tx, page_id, author)?;
         increase_change_counter(&tx)?;
         let page = current_page(&tx, page_id)?;
         tx.commit()?;
@@ -601,22 +606,23 @@ impl Snapshot {
 
     /// Records this snapshot as the page's next revision and updates its title, type, aliases
     /// and links accordingly.
-    fn store(&self, tx: &Transaction<'_>, page_id: i64) -> Result<()> {
+    fn store(&self, tx: &Transaction<'_>, page_id: i64, author: &Author) -> Result<()> {
         let number: u32 = tx.query_row(
             "SELECT coalesce(max(number), 0) + 1 FROM revision WHERE page_id = ?1",
             [page_id],
             |row| row.get(0),
         )?;
         tx.execute(
-            "INSERT INTO revision (page_id, number, title, page_type, aliases, body) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO revision (page_id, number, title, page_type, aliases, body, author) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 page_id,
                 number,
                 self.title,
                 self.page_type,
                 self.aliases.join("\n"),
-                self.body
+                self.body,
+                author.to_string()
             ],
         )?;
         tx.execute(
@@ -659,10 +665,10 @@ fn increase_change_counter(conn: &Connection) -> Result<()> {
 }
 
 const PAGE_SELECT_WITH_ID: &str = "SELECT p.id, r.title, r.page_type, r.aliases, r.body, \
-     r.number, p.created_at, r.created_at FROM page p JOIN revision r ON r.page_id = p.id";
+     r.number, p.created_at, r.created_at, r.author FROM page p JOIN revision r ON r.page_id = p.id";
 
 const PAGE_SELECT: &str = "SELECT r.title, r.page_type, r.aliases, r.body, r.number, \
-     p.created_at, r.created_at FROM page p JOIN revision r ON r.page_id = p.id";
+     p.created_at, r.created_at, r.author FROM page p JOIN revision r ON r.page_id = p.id";
 
 fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     row_to_page_from(row, 0)
@@ -683,6 +689,10 @@ fn row_to_page_from(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<P
         revision: row.get(first + 4)?,
         created_at: row.get(first + 5)?,
         updated_at: row.get(first + 6)?,
+        author: row
+            .get::<_, Option<String>>(first + 7)?
+            .as_deref()
+            .and_then(Author::parse),
     })
 }
 

@@ -17,10 +17,33 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--db`     | `MNEMOGRAPH_DB`     | `mnemograph.db`  |
 | `--listen` | `MNEMOGRAPH_LISTEN` | `127.0.0.1:8080` |
 | `--page-types` | `MNEMOGRAPH_PAGE_TYPES` | `project,technology,decision,person,tool,concept` |
+| `--oidc-issuer` | `MNEMOGRAPH_OIDC_ISSUER` | none: authentication disabled |
+| `--public-url` | `MNEMOGRAPH_PUBLIC_URL` | `http://localhost:8080` |
+| `--required-scopes` | `MNEMOGRAPH_REQUIRED_SCOPES` | `mnemograph` |
 
 `cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`. `cargo run -- delete page <title>` and `cargo run -- delete note <id>` permanently delete a page (with its revisions and aliases; links to it become stubs) or a note, after confirmation (`--yes` skips it). Agents cannot delete anything. These commands need exclusive access, so stop `serve` first.
 
-There is no authentication yet, so the server refuses to listen on anything but a loopback address.
+Without `--oidc-issuer`, authentication is disabled: every agent is anonymous and the server refuses to listen on anything but a loopback address.
+
+## Authentication
+
+Agents authenticate with OAuth (authorization code + PKCE) at an OIDC provider; mnemograph validates their access tokens and records the agent as the author of everything it writes (see [ADR 0002](docs/adr/0002-agents-use-authorization-code-with-pre-registered-clients.md)). For local development, run [Rauthy](https://github.com/sebadob/rauthy) in Docker:
+
+```sh
+dev/setup-rauthy.sh
+```
+
+It generates a local config with random secrets in `dev/rauthy/` (git-ignored; the admin password is in `dev/rauthy/secrets.env`), starts Rauthy on `http://localhost:8180`, and registers the scope `mnemograph` and the public client `claude-code`. Then:
+
+```sh
+cargo run -- serve --oidc-issuer http://localhost:8180/auth/v1/
+claude mcp add --transport http --client-id claude-code mnemograph http://localhost:8080/mcp
+claude mcp login mnemograph
+```
+
+Log in as `admin@localhost` in the browser that opens. Claude Code closes its callback listener right after receiving the code, so the browser may afterwards show a connection error even though the terminal reports "Authenticated". If the browser cannot reach the callback at all, paste the URL from its address bar into the terminal prompt within a minute.
+
+Access tokens must be signed by the issuer, have `typ: at+jwt`, carry `<public-url>/mcp` as audience (RFC 8707) and the required scopes. Clients without a token get a `401` pointing to the Protected Resource Metadata at `/.well-known/oauth-protected-resource/mcp` (RFC 9728). To stop Rauthy: `docker compose -f dev/compose.yaml down` (add `-v` to delete its data).
 
 ## Connecting Claude Code
 

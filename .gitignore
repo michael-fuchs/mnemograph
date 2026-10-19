@@ -4,3 +4,4 @@ Scratch.md
 *.db-shm
 *.db-wal
 *.db.search/
+dev/rauthy/

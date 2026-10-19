@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use crate::search::{IndexedText, Item};
 use crate::title::title_key;
 use crate::{
-    Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, increase_change_counter, links, names,
+    Author, Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, increase_change_counter, links,
+    names,
 };
 
 /// A short, timestamped, append-only entry recording something worth remembering.
@@ -15,19 +16,24 @@ pub struct Note {
     pub body: String,
     /// RFC 3339 timestamp (UTC).
     pub created_at: String,
+    /// Who recorded the note; `None` for notes from before authors were recorded.
+    pub author: Option<Author>,
     /// The titles the note links to, in order of first appearance.
     pub links: Vec<LinkTarget>,
 }
 
 impl Knowledge {
     /// Records a note. Its `[[links]]` attach it to the pages (or stubs) it concerns.
-    pub fn add_note(&self, body: &str) -> Result<Note> {
+    pub fn add_note(&self, body: &str, author: &Author) -> Result<Note> {
         if body.trim().is_empty() {
             return Err(Error::EmptyNote);
         }
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        tx.execute("INSERT INTO note (body) VALUES (?1)", [body])?;
+        tx.execute(
+            "INSERT INTO note (body, author) VALUES (?1, ?2)",
+            params![body, author.to_string()],
+        )?;
         let note_id = tx.last_insert_rowid();
         let mut insert = tx.prepare(
             "INSERT INTO note_link (note_id, target_title, target_key, position) \
@@ -91,10 +97,10 @@ pub(crate) fn find_note(conn: &Connection, note_id: i64) -> Result<Option<Note>>
 }
 
 fn note(conn: &Connection, note_id: i64) -> Result<Note> {
-    let (body, created_at) = conn.query_row(
-        "SELECT body, created_at FROM note WHERE id = ?1",
+    let (body, created_at, author) = conn.query_row(
+        "SELECT body, created_at, author FROM note WHERE id = ?1",
         [note_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?)),
     )?;
     let links = conn
         .prepare(&format!(
@@ -114,6 +120,7 @@ fn note(conn: &Connection, note_id: i64) -> Result<Note> {
         id: note_id,
         body,
         created_at,
+        author: author.as_deref().and_then(Author::parse),
         links,
     })
 }

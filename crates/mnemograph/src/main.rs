@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use mnemograph::{AppConfig, AuthSettings, Authenticator};
 use mnemograph_core::Knowledge;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -19,22 +20,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the HTTP server with the MCP endpoint at /mcp.
-    Serve {
-        /// Path of the SQLite database; created if missing.
-        #[arg(long, env = "MNEMOGRAPH_DB", default_value = "mnemograph.db")]
-        db: PathBuf,
-        /// Address to listen on.
-        #[arg(long, env = "MNEMOGRAPH_LISTEN", default_value = "127.0.0.1:8080")]
-        listen: SocketAddr,
-        /// Allowed page types, comma-separated.
-        #[arg(
-            long,
-            env = "MNEMOGRAPH_PAGE_TYPES",
-            value_delimiter = ',',
-            default_values_t = mnemograph_core::DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string())
-        )]
-        page_types: Vec<String>,
-    },
+    Serve(ServeArgs),
     /// Export all pages (as Markdown files) and notes (as JSONL) into a new directory.
     Export {
         /// Directory to write into; must not exist yet or be empty.
@@ -67,6 +53,44 @@ enum Command {
     },
 }
 
+#[derive(clap::Args)]
+struct ServeArgs {
+    /// Path of the SQLite database; created if missing.
+    #[arg(long, env = "MNEMOGRAPH_DB", default_value = "mnemograph.db")]
+    db: PathBuf,
+    /// Address to listen on.
+    #[arg(long, env = "MNEMOGRAPH_LISTEN", default_value = "127.0.0.1:8080")]
+    listen: SocketAddr,
+    /// Allowed page types, comma-separated.
+    #[arg(
+        long,
+        env = "MNEMOGRAPH_PAGE_TYPES",
+        value_delimiter = ',',
+        default_values_t = mnemograph_core::DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string())
+    )]
+    page_types: Vec<String>,
+    /// Issuer of agents' access tokens (the OIDC provider), exactly as in their `iss` claim.
+    /// Without it, authentication is disabled and only loopback addresses are allowed.
+    #[arg(long, env = "MNEMOGRAPH_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    /// The URL under which clients reach mnemograph; `<public-url>/mcp` is the audience
+    /// access tokens must have.
+    #[arg(
+        long,
+        env = "MNEMOGRAPH_PUBLIC_URL",
+        default_value = "http://localhost:8080"
+    )]
+    public_url: String,
+    /// Scopes an access token must have, comma-separated.
+    #[arg(
+        long,
+        env = "MNEMOGRAPH_REQUIRED_SCOPES",
+        value_delimiter = ',',
+        default_value = "mnemograph"
+    )]
+    required_scopes: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum DeleteTarget {
     /// Delete a page with all its revisions and aliases; links to it become stubs.
@@ -90,11 +114,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Serve {
-            db,
-            listen,
-            page_types,
-        } => serve(db, listen, page_types).await,
+        Command::Serve(args) => serve(args).await,
         Command::Export { dir, db } => export(db, dir),
         Command::Delete { what, db, yes } => delete(db, what, yes),
         Command::Reindex { db } => reindex(db),
@@ -172,24 +192,77 @@ fn reindex(db: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve(db: PathBuf, listen: SocketAddr, page_types: Vec<String>) -> anyhow::Result<()> {
-    // There is no authentication yet, so the server must not be reachable from other machines.
-    if !listen.ip().is_loopback() {
-        bail!(
-            "refusing to listen on {listen}: only loopback addresses are allowed until authentication exists"
-        );
+async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    let ServeArgs {
+        db,
+        listen,
+        page_types,
+        oidc_issuer,
+        public_url,
+        required_scopes,
+    } = args;
+    let public_url = reqwest::Url::parse(&public_url)
+        .with_context(|| format!("invalid public URL {public_url:?}"))?;
+    let public_base = public_url.as_str().trim_end_matches('/').to_owned();
+
+    let auth = match oidc_issuer {
+        Some(issuer) => {
+            let settings = AuthSettings {
+                issuer,
+                resource: format!("{public_base}/mcp"),
+                required_scopes: required_scopes
+                    .into_iter()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            };
+            let authenticator = Authenticator::discover(settings)
+                .await
+                .context("setting up authentication")?;
+            tracing::info!(
+                issuer = %authenticator.settings().issuer,
+                resource = %authenticator.settings().resource,
+                "agents must authenticate"
+            );
+            Some(Arc::new(authenticator))
+        }
+        None => {
+            // Without authentication the server must not be reachable from other machines.
+            if !listen.ip().is_loopback() {
+                bail!(
+                    "refusing to listen on {listen} without authentication: set --oidc-issuer or use a loopback address"
+                );
+            }
+            tracing::warn!(
+                "authentication is disabled (no --oidc-issuer); every agent is anonymous"
+            );
+            None
+        }
+    };
+
+    let mut allowed_hosts: Vec<String> =
+        ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec();
+    if let Some(host) = public_url.host_str() {
+        allowed_hosts.push(host.to_owned());
     }
 
     let knowledge = Knowledge::open(&db)
         .with_context(|| format!("opening database {}", db.display()))?
         .with_page_types(page_types);
     let shutdown = CancellationToken::new();
-    let app = mnemograph::app(Arc::new(knowledge), shutdown.child_token());
+    let app = mnemograph::app(
+        Arc::new(knowledge),
+        AppConfig {
+            auth,
+            allowed_hosts,
+            shutdown: shutdown.child_token(),
+        },
+    );
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
-    tracing::info!(db = %db.display(), "listening on http://{listen}");
+    tracing::info!(db = %db.display(), "listening on http://{listen}, reachable as {public_base}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;

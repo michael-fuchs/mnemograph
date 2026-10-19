@@ -3,15 +3,18 @@
 use std::sync::Arc;
 
 use mnemograph_core::{
-    Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related, SearchHit,
+    Author, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related,
+    SearchHit,
 };
 use rmcp::{
     ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{common::Extension, router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerConfig},
     schemars, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::auth::Identity;
 
 /// Sent to agents when they connect; tells them what mnemograph is and how to work with it.
 const INSTRUCTIONS: &str = "\
@@ -64,6 +67,9 @@ pub struct PageView {
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Who wrote the current revision: "owner:<user>", "agent:<client>" or "anonymous".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
     /// Titles this page links to, in order of appearance.
     pub links: Vec<LinkView>,
     /// Titles of the pages linking to this page.
@@ -78,6 +84,9 @@ pub struct NoteView {
     pub id: i64,
     pub body: String,
     pub created_at: String,
+    /// Who recorded the note: "owner:<user>", "agent:<client>" or "anonymous".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// Titles the note links to.
     pub links: Vec<LinkView>,
 }
@@ -88,6 +97,7 @@ impl From<Note> for NoteView {
             id: note.id,
             body: note.body,
             created_at: note.created_at,
+            author: note.author.as_ref().map(ToString::to_string),
             links: note.links.into_iter().map(LinkView::from).collect(),
         }
     }
@@ -125,6 +135,7 @@ impl PageView {
             revision: page.revision.into(),
             created_at: page.created_at,
             updated_at: page.updated_at,
+            updated_by: page.author.as_ref().map(ToString::to_string),
             links: links.outgoing.into_iter().map(LinkView::from).collect(),
             backlinks: links.backlinks,
             notes: notes.into_iter().map(NoteView::from).collect(),
@@ -276,11 +287,13 @@ impl McpServer {
     async fn write_page(
         &self,
         Parameters(args): Parameters<WritePageArgs>,
+        Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<PageView>, String> {
         let base_revision = args
             .base_revision
             .map(|base| u32::try_from(base).map_err(|_| format!("invalid base_revision {base}")))
             .transpose()?;
+        let author = author(&request)?;
         let knowledge = self.knowledge.clone();
         blocking(move || {
             let changes = PageChanges {
@@ -290,7 +303,8 @@ impl McpServer {
                     .map(|t| Some(t).filter(|t| !t.trim().is_empty())),
                 aliases: args.aliases,
             };
-            let page = knowledge.write_page(&args.title, &args.body, base_revision, changes)?;
+            let page =
+                knowledge.write_page(&args.title, &args.body, base_revision, changes, &author)?;
             let links = knowledge.links(&page.title)?;
             let notes = knowledge.notes_about(&page.title, RECENT_NOTES)?;
             Ok(PageView::new(page, links, notes))
@@ -374,9 +388,11 @@ impl McpServer {
     async fn add_note(
         &self,
         Parameters(args): Parameters<AddNoteArgs>,
+        Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<NoteView>, String> {
         let knowledge = self.knowledge.clone();
-        blocking(move || knowledge.add_note(&args.body))
+        let author = author(&request)?;
+        blocking(move || knowledge.add_note(&args.body, &author))
             .await
             .map(|note| rmcp::Json(note.into()))
     }
@@ -391,6 +407,18 @@ impl ServerHandler for McpServer {
                 "{INSTRUCTIONS}\n\nAllowed page types: {}.",
                 self.knowledge.page_types().join(", ")
             ))
+    }
+}
+
+/// The author of a write: the identity the authentication middleware attached to the request.
+/// Without one the write is refused, so a misconfigured router can never record a wrong author.
+fn author(request: &http::request::Parts) -> Result<Author, String> {
+    match request.extensions.get::<Identity>() {
+        Some(identity) => Ok(identity.author.clone()),
+        None => {
+            tracing::error!("request without identity reached a tool");
+            Err("internal error".to_owned())
+        }
     }
 }
 
