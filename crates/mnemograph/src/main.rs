@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use mnemograph::{AppConfig, AuthSettings, Authenticator};
+use mnemograph::{AppConfig, AuthSettings, Authenticator, WriteLimits};
 use mnemograph_core::Knowledge;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -89,6 +89,15 @@ struct ServeArgs {
         default_value = "mnemograph"
     )]
     required_scopes: Vec<String>,
+    /// Largest page body an agent may write, in bytes.
+    #[arg(long, env = "MNEMOGRAPH_MAX_PAGE_BYTES", default_value_t = WriteLimits::default().max_page_bytes)]
+    max_page_bytes: usize,
+    /// Largest note an agent may write, in bytes.
+    #[arg(long, env = "MNEMOGRAPH_MAX_NOTE_BYTES", default_value_t = WriteLimits::default().max_note_bytes)]
+    max_note_bytes: usize,
+    /// Writes (write_page, add_note) each agent may make per minute.
+    #[arg(long, env = "MNEMOGRAPH_WRITES_PER_MINUTE", default_value_t = WriteLimits::default().writes_per_minute)]
+    writes_per_minute: u32,
 }
 
 #[derive(Subcommand)]
@@ -200,6 +209,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         oidc_issuer,
         public_url,
         required_scopes,
+        max_page_bytes,
+        max_note_bytes,
+        writes_per_minute,
     } = args;
     let public_url = reqwest::Url::parse(&public_url)
         .with_context(|| format!("invalid public URL {public_url:?}"))?;
@@ -255,6 +267,11 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         AppConfig {
             auth,
             allowed_hosts,
+            limits: WriteLimits {
+                max_page_bytes,
+                max_note_bytes,
+                writes_per_minute,
+            },
             shutdown: shutdown.child_token(),
         },
     );

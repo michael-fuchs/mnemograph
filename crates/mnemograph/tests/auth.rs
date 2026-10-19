@@ -98,6 +98,7 @@ impl TestServer {
             AppConfig {
                 auth: Some(Arc::new(authenticator)),
                 allowed_hosts: vec!["127.0.0.1".into()],
+                limits: Default::default(),
                 shutdown: shutdown.child_token(),
             },
         );

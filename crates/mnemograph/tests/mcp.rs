@@ -20,6 +20,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with(Default::default()).await
+    }
+
+    async fn start_with(limits: mnemograph::WriteLimits) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let knowledge = Knowledge::open(dir.path().join("test.db")).unwrap();
         let shutdown = CancellationToken::new();
@@ -28,6 +32,7 @@ impl TestServer {
             mnemograph::AppConfig {
                 auth: None,
                 allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
+                limits,
                 shutdown: shutdown.child_token(),
             },
         );
@@ -489,4 +494,44 @@ async fn search_finds_pages_and_notes_with_snippets() {
             "snippet": "Wir vergleichen **Datenbanken**."
         }])
     );
+}
+
+#[tokio::test]
+async fn writes_beyond_the_limits_are_rejected_with_the_limit_named() {
+    let server = TestServer::start_with(mnemograph::WriteLimits {
+        max_page_bytes: 20,
+        max_note_bytes: 10,
+        writes_per_minute: 3,
+    })
+    .await;
+
+    let too_long = server
+        .call(
+            "write_page",
+            json!({ "title": "Big", "body": "x".repeat(21) }),
+        )
+        .await;
+    assert!(error_text(&too_long).contains("the limit is 20 bytes"));
+    let long_note = server
+        .call("add_note", json!({ "body": "a note that is too long" }))
+        .await;
+    assert!(error_text(&long_note).contains("the limit is 10 bytes"));
+
+    // The two rejected writes above did not count; three more fit into the minute.
+    for title in ["A", "B"] {
+        let ok = server
+            .call("write_page", json!({ "title": title, "body": "ok" }))
+            .await;
+        structured(&ok);
+    }
+    let note = server.call("add_note", json!({ "body": "short" })).await;
+    structured(&note);
+    let fourth = server
+        .call("write_page", json!({ "title": "C", "body": "ok" }))
+        .await;
+    assert!(error_text(&fourth).contains("at most 3 writes per minute"));
+
+    // Reading is not limited.
+    let read = server.call("read_page", json!({ "title": "A" })).await;
+    structured(&read);
 }

@@ -1,6 +1,7 @@
 //! The mnemograph server: HTTP routes and the MCP endpoint on top of [`mnemograph_core`].
 
 pub mod auth;
+mod limits;
 mod mcp;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio_util::sync::CancellationToken;
 
 pub use auth::{AuthSettings, Authenticator, Identity};
+pub use limits::WriteLimits;
 pub use mcp::{
     HitView, LinkView, McpServer, NoteView, PageView, RelatedEntry, RelatedView, SearchView,
 };
@@ -25,6 +27,8 @@ pub struct AppConfig {
     /// Host names (optionally with port) under which clients reach the server; requests with
     /// another `Host` header are rejected (DNS rebinding protection).
     pub allowed_hosts: Vec<String>,
+    /// Limits on agent writes.
+    pub limits: WriteLimits,
     /// Cancelling it stops open MCP streams.
     pub shutdown: CancellationToken,
 }
@@ -38,7 +42,10 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         .with_allowed_hosts(config.allowed_hosts)
         .with_cancellation_token(config.shutdown);
     let mcp: StreamableHttpService<McpServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(McpServer::new(knowledge.clone())),
+        {
+            let limiter = Arc::new(limits::Limiter::new(config.limits));
+            move || Ok(McpServer::new(knowledge.clone(), limiter.clone()))
+        },
         Default::default(),
         mcp_config,
     );

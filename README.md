@@ -20,6 +20,9 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--oidc-issuer` | `MNEMOGRAPH_OIDC_ISSUER` | none: authentication disabled |
 | `--public-url` | `MNEMOGRAPH_PUBLIC_URL` | `http://localhost:8080` |
 | `--required-scopes` | `MNEMOGRAPH_REQUIRED_SCOPES` | `mnemograph` |
+| `--max-page-bytes` | `MNEMOGRAPH_MAX_PAGE_BYTES` | `204800` (200 KiB) |
+| `--max-note-bytes` | `MNEMOGRAPH_MAX_NOTE_BYTES` | `4096` (4 KiB) |
+| `--writes-per-minute` | `MNEMOGRAPH_WRITES_PER_MINUTE` | `60` per agent |
 
 `cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`. `cargo run -- delete page <title>` and `cargo run -- delete note <id>` permanently delete a page (with its revisions and aliases; links to it become stubs) or a note, after confirmation (`--yes` skips it). Agents cannot delete anything. These commands need exclusive access, so stop `serve` first.
 
