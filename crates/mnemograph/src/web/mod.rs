@@ -1,5 +1,7 @@
-//! The owner's read-only web UI: browse pages, stubs and notes.
+//! The owner's read-only web UI: browse pages, stubs and notes, search, and page histories.
+//! Open views update themselves when agents write (Datastar over server-sent events).
 
+mod live;
 pub mod login;
 pub mod render;
 
@@ -8,18 +10,23 @@ use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
-use mnemograph_core::{Author, Knowledge, Note, Session, title_key};
+use mnemograph_core::{Author, Found, Knowledge, Note, Session, title_key};
+use serde::Deserialize;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use login::{LoginSettings, PendingLogins};
 use render::{page_url, render};
 
 /// How many recent notes the start page and a page show.
 const RECENT_NOTES: u32 = 20;
+/// How many hits the search page shows.
+const SEARCH_HITS: usize = 50;
 
 /// What the web handlers share.
 pub struct WebState {
@@ -27,18 +34,33 @@ pub struct WebState {
     /// `None`: no login, everyone is the owner (development on loopback only).
     pub login: Option<LoginSettings>,
     pending_logins: PendingLogins,
+    /// Changes whenever agents write.
+    changes: watch::Receiver<u64>,
+    /// Ends the live update streams when the server shuts down.
+    shutdown: CancellationToken,
 }
 
 /// The web UI's routes.
-pub fn router(knowledge: Arc<Knowledge>, login: Option<LoginSettings>) -> Router {
+pub fn router(
+    knowledge: Arc<Knowledge>,
+    login: Option<LoginSettings>,
+    changes: watch::Receiver<u64>,
+    shutdown: CancellationToken,
+) -> Router {
     let state = Arc::new(WebState {
         knowledge,
         login,
         pending_logins: PendingLogins::default(),
+        changes,
+        shutdown,
     });
     let owner_only = Router::new()
         .route("/", get(index))
+        .route("/search", get(search))
         .route("/pages/{title}", get(page))
+        .route("/pages/{title}/history", get(history))
+        .route("/pages/{title}/revisions/{number}", get(revision))
+        .route("/live", get(live::live))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             login::require_owner,
@@ -51,6 +73,7 @@ pub fn router(knowledge: Arc<Knowledge>, login: Option<LoginSettings>) -> Router
         .route("/logged-out", get(logged_out))
         .route("/assets/style.css", get(style))
         .route("/assets/mermaid.min.js", get(mermaid))
+        .route("/assets/datastar.js", get(datastar))
         .with_state(state)
 }
 
@@ -58,13 +81,42 @@ pub fn router(knowledge: Arc<Knowledge>, login: Option<LoginSettings>) -> Router
 struct Header {
     /// The logged-in owner, if login is enabled.
     owner_name: Option<String>,
+    /// The search query, to keep it in the search box.
+    query: String,
+    /// The view's path, if it updates itself when agents write.
+    live: Option<String>,
 }
 
 impl Header {
     fn new(state: &WebState, session: &Session) -> Self {
         Self {
             owner_name: state.login.as_ref().map(|_| session.owner_name.clone()),
+            query: String::new(),
+            live: None,
         }
+    }
+
+    /// A header without a session, for the login flow's pages.
+    fn anonymous() -> Self {
+        Self {
+            owner_name: None,
+            query: String::new(),
+            live: None,
+        }
+    }
+
+    fn live(mut self, view: String) -> Self {
+        self.live = Some(view);
+        self
+    }
+
+    /// The live update request for Datastar's `data-init`.
+    fn live_request(&self) -> String {
+        let view = self.live.as_deref().unwrap_or("/");
+        format!(
+            "@get('/live?view={}')",
+            percent_encoding::utf8_percent_encode(view, percent_encoding::NON_ALPHANUMERIC)
+        )
     }
 }
 
@@ -103,6 +155,7 @@ struct IndexTemplate {
 struct PageTemplate {
     header: Header,
     title: String,
+    url: String,
     page_type: Option<String>,
     aliases: Vec<String>,
     revision: u32,
@@ -123,6 +176,66 @@ struct StubTemplate {
     title: String,
     backlinks: Vec<LinkItem>,
     notes: Vec<NoteItem>,
+    has_mermaid: bool,
+}
+
+struct HitItem {
+    /// "page" or "note".
+    kind: &'static str,
+    title: String,
+    url: String,
+    page_type: Option<String>,
+    meta: String,
+    snippet_html: String,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "search.html")]
+struct SearchTemplate {
+    header: Header,
+    page_type: String,
+    page_types: Vec<String>,
+    searched: bool,
+    hits: Vec<HitItem>,
+    error: Option<String>,
+    has_mermaid: bool,
+}
+
+struct RevisionRow {
+    number: u32,
+    url: String,
+    title: String,
+    page_type: Option<String>,
+    created_at: String,
+    author: String,
+    bytes: usize,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "history.html")]
+struct HistoryTemplate {
+    header: Header,
+    title: String,
+    url: String,
+    rows: Vec<RevisionRow>,
+    has_mermaid: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "revision.html")]
+struct RevisionTemplate {
+    header: Header,
+    /// The page's current title.
+    title: String,
+    url: String,
+    number: u32,
+    latest: u32,
+    revision_title: String,
+    page_type: Option<String>,
+    aliases: Vec<String>,
+    created_at: String,
+    author: String,
+    body_html: String,
     has_mermaid: bool,
 }
 
@@ -155,7 +268,7 @@ async fn index(
     };
     let (notes, has_mermaid) = note_items(notes, &stubs);
     IndexTemplate {
-        header: Header::new(&state, &session),
+        header: Header::new(&state, &session).live("/".to_owned()),
         pages: pages
             .into_iter()
             .map(|page| PageRow {
@@ -213,7 +326,7 @@ async fn page(
         }
         let (notes, has_mermaid) = note_items(notes, &stubs);
         return StubTemplate {
-            header,
+            header: header.live(page_url(title.trim())),
             title: title.trim().to_owned(),
             backlinks,
             notes,
@@ -236,7 +349,8 @@ async fn page(
     let body = render(&page.body, &stubs);
     let (notes, notes_have_mermaid) = note_items(notes, &stubs);
     PageTemplate {
-        header,
+        header: header.live(page_url(&page.title)),
+        url: page_url(&page.title),
         links: links
             .outgoing
             .iter()
@@ -261,10 +375,196 @@ async fn page(
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default, rename = "type")]
+    page_type: String,
+}
+
+async fn search(
+    State(state): State<Arc<WebState>>,
+    Extension(session): Extension<Session>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    let mut header = Header::new(&state, &session);
+    header.query = query.q.trim().to_owned();
+    let page_type = query.page_type.trim().to_owned();
+    let mut template = SearchTemplate {
+        header,
+        page_type: page_type.clone(),
+        page_types: state.knowledge.page_types().to_vec(),
+        searched: !query.q.trim().is_empty(),
+        hits: Vec::new(),
+        error: None,
+        has_mermaid: false,
+    };
+    if !template.searched {
+        return template.into_response();
+    }
+    let knowledge = state.knowledge.clone();
+    let text = query.q.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let page_type = Some(page_type).filter(|t| !t.is_empty());
+        knowledge.search(&text, page_type.as_deref(), SEARCH_HITS)
+    })
+    .await;
+    match found {
+        Ok(Ok(hits)) => {
+            template.hits = hits
+                .into_iter()
+                .map(|hit| {
+                    let snippet_html = snippet_html(&hit.snippet);
+                    match hit.found {
+                        Found::Page { title, page_type } => HitItem {
+                            kind: "page",
+                            url: page_url(&title),
+                            title,
+                            page_type,
+                            meta: String::new(),
+                            snippet_html,
+                        },
+                        Found::Note(note) => HitItem {
+                            kind: "note",
+                            url: format!("/#note-{}", note.id),
+                            title: format!("Note #{}", note.id),
+                            page_type: None,
+                            meta: format!(
+                                "{} · {}",
+                                timestamp(&note.created_at),
+                                author_label(note.author.as_ref())
+                            ),
+                            snippet_html,
+                        },
+                    }
+                })
+                .collect();
+        }
+        Ok(Err(err)) => template.error = Some(err.to_string()),
+        Err(_) => return internal_error(&state, &session),
+    }
+    template.into_response()
+}
+
+async fn history(
+    State(state): State<Arc<WebState>>,
+    Extension(session): Extension<Session>,
+    Path(title): Path<String>,
+) -> Response {
+    let knowledge = state.knowledge.clone();
+    let requested = title.clone();
+    let loaded = tokio::task::spawn_blocking(move || knowledge.revisions(&requested)).await;
+    let Ok(Ok(revisions)) = loaded else {
+        return internal_error(&state, &session);
+    };
+    let header = Header::new(&state, &session);
+    let Some(revisions) = revisions.filter(|r| !r.is_empty()) else {
+        return message(
+            StatusCode::NOT_FOUND,
+            header,
+            "Not found",
+            &format!("There is no page titled {title:?}."),
+        );
+    };
+    let current = revisions[0].title.clone();
+    if current != title {
+        return Redirect::permanent(&format!("{}/history", page_url(&current))).into_response();
+    }
+    let url = page_url(&current);
+    HistoryTemplate {
+        header: header.live(format!("{url}/history")),
+        rows: revisions
+            .into_iter()
+            .map(|r| RevisionRow {
+                url: format!("{url}/revisions/{}", r.number),
+                number: r.number,
+                title: r.title,
+                page_type: r.page_type,
+                created_at: timestamp(&r.created_at),
+                author: author_label(r.author.as_ref()),
+                bytes: r.body_bytes,
+            })
+            .collect(),
+        title: current,
+        url,
+        has_mermaid: false,
+    }
+    .into_response()
+}
+
+async fn revision(
+    State(state): State<Arc<WebState>>,
+    Extension(session): Extension<Session>,
+    Path((title, number)): Path<(String, u32)>,
+) -> Response {
+    let knowledge = state.knowledge.clone();
+    let requested = title.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        Ok::<_, mnemograph_core::Error>((
+            knowledge.page(&requested)?,
+            knowledge.page_revision(&requested, number)?,
+        ))
+    })
+    .await;
+    let Ok(Ok((current, revision))) = loaded else {
+        return internal_error(&state, &session);
+    };
+    let header = Header::new(&state, &session);
+    let (Some(current), Some(revision)) = (current, revision) else {
+        return message(
+            StatusCode::NOT_FOUND,
+            header,
+            "Not found",
+            &format!("{title:?} has no revision {number}."),
+        );
+    };
+    let url = page_url(&current.title);
+    if current.title != title {
+        return Redirect::permanent(&format!("{url}/revisions/{number}")).into_response();
+    }
+    let body = render(&revision.body, &HashSet::new());
+    RevisionTemplate {
+        header,
+        title: current.title,
+        url,
+        number,
+        latest: current.revision,
+        revision_title: revision.title,
+        page_type: revision.page_type,
+        aliases: revision.aliases,
+        created_at: timestamp(&revision.updated_at),
+        author: author_label(revision.author.as_ref()),
+        body_html: body.html,
+        has_mermaid: body.has_mermaid,
+    }
+    .into_response()
+}
+
+/// Search snippets mark matches with `**`; everything else is plain text.
+fn snippet_html(snippet: &str) -> String {
+    let escaped = snippet
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    let mut html = String::new();
+    for (i, part) in escaped.split("**").enumerate() {
+        if i % 2 == 1 {
+            html += "<mark>";
+            html += part;
+            html += "</mark>";
+        } else {
+            html += part;
+        }
+    }
+    html
+}
+
 async fn logged_out() -> Response {
     message(
         StatusCode::OK,
-        Header { owner_name: None },
+        Header::anonymous(),
         "Logged out",
         "You are logged out of mnemograph.",
     )
@@ -274,6 +574,17 @@ async fn style() -> Response {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../../assets/style.css"),
+    )
+        .into_response()
+}
+
+async fn datastar() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        include_str!("../../assets/datastar-1.0.4.js"),
     )
         .into_response()
 }
@@ -351,7 +662,7 @@ fn message(status: StatusCode, header: Header, title: &str, text: &str) -> Respo
 
 /// An error page for the login flow, shown without a session.
 pub fn error_page(status: StatusCode, text: &str) -> Response {
-    message(status, Header { owner_name: None }, "Login failed", text)
+    message(status, Header::anonymous(), "Login failed", text)
 }
 
 fn internal_error(state: &WebState, session: &Session) -> Response {
@@ -378,6 +689,14 @@ mod tests {
         assert_eq!(
             timestamp("2026-10-18T12:05:11.141Z"),
             "2026-10-18 12:05 UTC"
+        );
+    }
+
+    #[test]
+    fn snippets_are_escaped_and_matches_marked() {
+        assert_eq!(
+            snippet_html("use **Caddy** <script>x</script> & **TLS**"),
+            "use <mark>Caddy</mark> &lt;script&gt;x&lt;/script&gt; &amp; <mark>TLS</mark>"
         );
     }
 }

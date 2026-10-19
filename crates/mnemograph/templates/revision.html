@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}, revision {{ number }} – mnemograph{% endblock %}
+{% block content %}
+{% if number != latest %}
+<p class="notice">You are looking at revision {{ number }} of {{ latest }}. <a href="{{ url }}">Current version</a> · <a href="{{ url }}/history">History</a></p>
+{% else %}
+<p class="notice">This is the current revision. <a href="{{ url }}">Page</a> · <a href="{{ url }}/history">History</a></p>
+{% endif %}
+<article class="page">
+  <h1>{{ revision_title }}</h1>
+  <p class="meta">
+    {% if let Some(t) = page_type %}<span class="type">{{ t }}</span>{% endif %}
+    revision {{ number }} · {{ created_at }} by {{ author }}
+    {% if !aliases.is_empty() %}<br>also known as: {{ aliases.join(", ") }}{% endif %}
+  </p>
+  <div class="body">{{ body_html|safe }}</div>
+</article>
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}History of {{ title }} – mnemograph{% endblock %}
+{% block content %}
+<h1>History of <a href="{{ url }}">{{ title }}</a></h1>
+<table class="history">
+  <thead><tr><th>Revision</th><th>Created</th><th>By</th><th>Title</th><th>Type</th><th>Size</th></tr></thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{{ row.url }}">{{ row.number }}</a>{% if loop.first %} <span class="type">current</span>{% endif %}</td>
+      <td class="nowrap">{{ row.created_at }}</td>
+      <td>{{ row.author }}</td>
+      <td>{{ row.title }}</td>
+      <td>{% if let Some(t) = row.page_type %}<span class="type">{{ t }}</span>{% endif %}</td>
+      <td class="nowrap">{{ row.bytes }} bytes</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

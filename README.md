@@ -2,7 +2,7 @@
 
 A lean, self-hosted knowledge base that is both a human-readable wiki and a long-term memory for AI agents, shipped as a single Rust binary.
 
-**Status:** early development. The plan is in [`docs/plans/mnemograph-v1.md`](docs/plans/mnemograph-v1.md), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md) and design decisions in [`docs/adr/`](docs/adr/).
+**Status:** v1 feature-complete for local use; deployment on a server is next. The plan is in [`docs/plans/mnemograph-v1.md`](docs/plans/mnemograph-v1.md), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md) and design decisions in [`docs/adr/`](docs/adr/).
 
 ## Running locally
 
@@ -57,7 +57,14 @@ Log in as `admin@localhost` in the browser that opens. Claude Code closes its ca
 
 ## Web UI
 
-With authentication on, `http://localhost:8080/` asks the owner to log in at the OIDC provider (authorization code flow with PKCE). Only members of the owner group get in; the session is kept for 7 days in a cookie, and the database stores only a hash of it. The UI is read-only: the page list with recent notes, pages with rendered Markdown (tables, task lists, footnotes, alerts, Mermaid diagrams), links, backlinks and notes, and stubs with what links to them. Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
+With authentication on, `http://localhost:8080/` asks the owner to log in at the OIDC provider (authorization code flow with PKCE). Only members of the owner group get in; the session is kept for 7 days in a cookie, and the database stores only a hash of it. The UI is read-only:
+
+- the page list with recent notes;
+- pages with rendered Markdown (tables, task lists, footnotes, alerts, Mermaid diagrams), links, backlinks and notes, and stubs with what links to them;
+- search over pages and notes, optionally limited to a page type;
+- each page's history with author and time of every revision, and any revision rendered as it was.
+
+The page list, pages and histories update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
 
 "Log out" ends the mnemograph session; the provider's own session stays, so logging in again does not ask for the password.
 
