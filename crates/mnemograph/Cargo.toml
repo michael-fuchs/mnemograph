@@ -20,14 +20,21 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 http = "1"
 tower = "0.5"
 thiserror = "2"
+askama = "0.16"
+askama_web = { version = "0.16", features = ["axum-0.8"] }
+comrak = { version = "0.56", default-features = false }
+percent-encoding = "2"
+rand = "0.9"
+base64 = "0.23.1"
+sha2 = "0.10"
 
 [dev-dependencies]
-base64 = "0.23.1"
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem", "rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+sha2 = "0.10"
 tempfile.workspace = true

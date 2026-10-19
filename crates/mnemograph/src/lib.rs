@@ -3,6 +3,7 @@
 pub mod auth;
 mod limits;
 mod mcp;
+pub mod web;
 
 use std::sync::Arc;
 
@@ -29,6 +30,9 @@ pub struct AppConfig {
     pub allowed_hosts: Vec<String>,
     /// Limits on agent writes.
     pub limits: WriteLimits,
+    /// The owner's browser login for the web UI. `None` disables it: everyone is the owner,
+    /// which is only acceptable on a loopback address during development.
+    pub web_login: Option<web::login::LoginSettings>,
     /// Cancelling it stops open MCP streams.
     pub shutdown: CancellationToken,
 }
@@ -41,6 +45,7 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         .with_json_response(true)
         .with_allowed_hosts(config.allowed_hosts)
         .with_cancellation_token(config.shutdown);
+    let web = web::router(knowledge.clone(), config.web_login);
     let mcp: StreamableHttpService<McpServer, LocalSessionManager> = StreamableHttpService::new(
         {
             let limiter = Arc::new(limits::Limiter::new(config.limits));
@@ -49,7 +54,9 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         Default::default(),
         mcp_config,
     );
-    let router = Router::new().route("/health", get(|| async { "ok" }));
+    let router = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .merge(web);
 
     match config.auth {
         None => router.nest_service(

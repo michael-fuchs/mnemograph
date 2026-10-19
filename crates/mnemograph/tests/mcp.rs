@@ -33,6 +33,7 @@ impl TestServer {
                 auth: None,
                 allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
                 limits,
+                web_login: None,
                 shutdown: shutdown.child_token(),
             },
         );

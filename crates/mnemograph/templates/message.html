@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} – mnemograph{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p>{{ message }}</p>
+{% if login_link %}<p><a href="/login">Log in again</a></p>{% else %}<p><a href="/">Back to the start page</a></p>{% endif %}
+{% endblock %}
