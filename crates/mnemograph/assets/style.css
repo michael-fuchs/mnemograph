@@ -52,3 +52,17 @@ ol.notes { list-style: none; padding: 0; }
 .note .body > :first-child { margin-top: 0.2rem; }
 .note .body > :last-child { margin-bottom: 0; }
 .context { margin-top: 2.5rem; border-top: 2px solid var(--line); }
+header.site form.search { flex: 1; margin: 0 1.2rem; max-width: 26rem; }
+input[type="search"], select, .search-page button {
+  font: inherit; font-size: 0.95rem; padding: 0.3rem 0.6rem; width: 100%;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+}
+.search-page { display: flex; gap: 0.5rem; margin: 0.5rem 0 1rem; }
+.search-page select, .search-page button { width: auto; }
+.search-page button { cursor: pointer; }
+ol.hits { list-style: none; padding: 0; }
+.hit { border-top: 1px solid var(--line); padding: 0.6rem 0; }
+.hit .snippet { margin: 0.2rem 0 0; color: var(--muted); }
+mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: inherit; padding: 0 0.1rem; }
+.notice { padding: 0.5rem 0.8rem; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); }
+.error { color: var(--stub); }

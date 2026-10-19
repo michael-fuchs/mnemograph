@@ -1289,3 +1289,43 @@ fn expired_sessions_are_not_found_and_tokens_are_not_stored() {
         .unwrap();
     assert!(!stored.contains(&token));
 }
+
+// History
+
+#[test]
+fn revisions_list_the_history_newest_first_with_authors() {
+    let knowledge = knowledge();
+    let claude = Author::Agent("claude-code".into());
+    let owner = Author::Owner("user-1".into());
+    knowledge
+        .write_page("Proxy", "Traefik", None, PageChanges::default(), &claude)
+        .unwrap();
+    knowledge
+        .write_page(
+            "Proxy",
+            "Caddy, because of automatic HTTPS",
+            Some(1),
+            PageChanges {
+                new_title: Some("Reverse proxy".into()),
+                page_type: Some(Some("decision".into())),
+                ..Default::default()
+            },
+            &owner,
+        )
+        .unwrap();
+
+    let history = knowledge.revisions("proxy").unwrap().unwrap();
+    let summary: Vec<_> = history
+        .iter()
+        .map(|r| (r.number, r.title.as_str(), r.author.clone(), r.body_bytes))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (2, "Reverse proxy", Some(owner), 33),
+            (1, "Proxy", Some(claude), 7)
+        ]
+    );
+    assert_eq!(history[0].page_type.as_deref(), Some("decision"));
+    assert_eq!(knowledge.revisions("Nothing").unwrap(), None);
+}

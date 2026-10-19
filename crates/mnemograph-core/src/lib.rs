@@ -127,6 +127,20 @@ pub struct PageChanges {
     pub aliases: Option<Vec<String>>,
 }
 
+/// One entry of a page's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionSummary {
+    pub number: u32,
+    /// The page's title in this revision.
+    pub title: String,
+    pub page_type: Option<String>,
+    /// When this revision was created, as an RFC 3339 timestamp (UTC).
+    pub created_at: String,
+    pub author: Option<Author>,
+    /// Length of the body in bytes.
+    pub body_bytes: usize,
+}
+
 /// A link from a page to a title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkTarget {
@@ -451,6 +465,35 @@ impl Knowledge {
                 row_to_page,
             )
             .optional()?)
+    }
+
+    /// Returns the history of the page with this title or alias, newest revision first, or
+    /// `None` if there is no such page.
+    pub fn revisions(&self, title: &str) -> Result<Option<Vec<RevisionSummary>>> {
+        let conn = self.conn();
+        let Some(page_id) = resolve(&conn, &title_key(title))? else {
+            return Ok(None);
+        };
+        let revisions = conn
+            .prepare(
+                "SELECT number, title, page_type, created_at, author, length(CAST(body AS BLOB)) \
+                 FROM revision WHERE page_id = ?1 ORDER BY number DESC",
+            )?
+            .query_map([page_id], |row| {
+                Ok(RevisionSummary {
+                    number: row.get(0)?,
+                    title: row.get(1)?,
+                    page_type: row.get(2)?,
+                    created_at: row.get(3)?,
+                    author: row
+                        .get::<_, Option<String>>(4)?
+                        .as_deref()
+                        .and_then(Author::parse),
+                    body_bytes: row.get::<_, i64>(5)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(revisions))
     }
 
     /// Returns the links around a title or alias, whether it names a page or a stub.

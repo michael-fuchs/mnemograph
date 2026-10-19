@@ -723,6 +723,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11c0bd7d22989969a619bae09147b992a6aa7f31dd4f9d9af6345f533744781f"
 
 [[package]]
+name = "datastar"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27799c6e0b861af6c4bd0afc91454a0d3f2f9ac7560417bbf1bfd3da5d9d6205"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1807,7 +1818,9 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "comrak",
+ "datastar",
  "ed25519-dalek 3.0.0",
+ "futures",
  "http",
  "jsonwebtoken",
  "mnemograph-core",
