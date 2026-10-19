@@ -23,7 +23,14 @@ impl TestServer {
         let dir = tempfile::tempdir().unwrap();
         let knowledge = Knowledge::open(dir.path().join("test.db")).unwrap();
         let shutdown = CancellationToken::new();
-        let app = mnemograph::app(Arc::new(knowledge), shutdown.child_token());
+        let app = mnemograph::app(
+            Arc::new(knowledge),
+            mnemograph::AppConfig {
+                auth: None,
+                allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
+                shutdown: shutdown.child_token(),
+            },
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

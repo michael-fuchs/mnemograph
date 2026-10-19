@@ -1,0 +1,17 @@
+# Local development stack: Rauthy as the OIDC provider for mnemograph (ADR 0002).
+# Run dev/setup-rauthy.sh instead of using this file directly: it generates the config
+# (dev/rauthy/, git-ignored) and registers the clients.
+# The production instance is provided by ../server-infra.
+
+services:
+  rauthy:
+    image: ghcr.io/sebadob/rauthy:0.37.1
+    ports:
+      - "127.0.0.1:8180:8180"
+    volumes:
+      - ./rauthy/config.toml:/app/config.toml:ro
+      - ./rauthy/bootstrap:/app/bootstrap:ro
+      - rauthy-data:/app/data
+
+volumes:
+  rauthy-data:
