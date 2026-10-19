@@ -1,0 +1,18 @@
+{% macro link_list(items) %}
+<ul class="links">
+  {% for item in items %}
+  <li><a href="{{ item.url }}"{% if item.stub %} class="stub" title="Not written yet"{% endif %}>{{ item.title }}</a></li>
+  {% endfor %}
+</ul>
+{% endmacro %}
+
+{% macro note_list(notes) %}
+<ol class="notes">
+  {% for note in notes %}
+  <li class="note" id="note-{{ note.id }}">
+    <div class="meta">{{ note.created_at }} · {{ note.author }} · #{{ note.id }}</div>
+    <div class="body">{{ note.html|safe }}</div>
+  </li>
+  {% endfor %}
+</ol>
+{% endmacro %}

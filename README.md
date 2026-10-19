@@ -20,6 +20,9 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--oidc-issuer` | `MNEMOGRAPH_OIDC_ISSUER` | none: authentication disabled |
 | `--public-url` | `MNEMOGRAPH_PUBLIC_URL` | `http://localhost:8080` |
 | `--required-scopes` | `MNEMOGRAPH_REQUIRED_SCOPES` | `mnemograph` |
+| `--web-client-id` | `MNEMOGRAPH_WEB_CLIENT_ID` | `mnemograph-web` |
+| `--web-client-secret` | `MNEMOGRAPH_WEB_CLIENT_SECRET` | none: public client (PKCE only) |
+| `--owner-group` | `MNEMOGRAPH_OWNER_GROUP` | `mnemograph_owner` |
 | `--max-page-bytes` | `MNEMOGRAPH_MAX_PAGE_BYTES` | `204800` (200 KiB) |
 | `--max-note-bytes` | `MNEMOGRAPH_MAX_NOTE_BYTES` | `4096` (4 KiB) |
 | `--writes-per-minute` | `MNEMOGRAPH_WRITES_PER_MINUTE` | `60` per agent |
@@ -36,15 +39,27 @@ Agents authenticate with OAuth (authorization code + PKCE) at an OIDC provider; 
 dev/setup-rauthy.sh
 ```
 
-It generates a local config with random secrets in `dev/rauthy/` (git-ignored; the admin password is in `dev/rauthy/secrets.env`), starts Rauthy on `http://localhost:8180`, and registers the scope `mnemograph` and the public client `claude-code`. Then:
+It generates a local config with random secrets in `dev/rauthy/` (git-ignored; the admin password is in `dev/rauthy/secrets.env`), starts Rauthy on `http://localhost:8180`, and registers:
+
+- the scope `mnemograph` and the public client `claude-code` for agents,
+- the group `mnemograph_owner` with the admin in it, and the confidential client `mnemograph-web` for the web UI; mnemograph's settings for it go to `dev/rauthy/mnemograph.env`.
+
+Then:
 
 ```sh
-cargo run -- serve --oidc-issuer http://localhost:8180/auth/v1/
+set -a; . dev/rauthy/mnemograph.env; set +a
+cargo run -- serve
 claude mcp add --transport http --client-id claude-code mnemograph http://localhost:8080/mcp
 claude mcp login mnemograph
 ```
 
 Log in as `admin@localhost` in the browser that opens. Claude Code closes its callback listener right after receiving the code, so the browser may afterwards show a connection error even though the terminal reports "Authenticated". If the browser cannot reach the callback at all, paste the URL from its address bar into the terminal prompt within a minute.
+
+## Web UI
+
+With authentication on, `http://localhost:8080/` asks the owner to log in at the OIDC provider (authorization code flow with PKCE). Only members of the owner group get in; the session is kept for 7 days in a cookie, and the database stores only a hash of it. The UI is read-only: the page list with recent notes, pages with rendered Markdown (tables, task lists, footnotes, alerts, Mermaid diagrams), links, backlinks and notes, and stubs with what links to them. Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
+
+"Log out" ends the mnemograph session; the provider's own session stays, so logging in again does not ask for the password.
 
 Access tokens must be signed by the issuer, have `typ: at+jwt`, carry `<public-url>/mcp` as audience (RFC 8707) and the required scopes. Clients without a token get a `401` pointing to the Protected Resource Metadata at `/.well-known/oauth-protected-resource/mcp` (RFC 9728). To stop Rauthy: `docker compose -f dev/compose.yaml down` (add `-v` to delete its data).
 

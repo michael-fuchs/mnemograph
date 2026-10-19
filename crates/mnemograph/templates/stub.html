@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{{ title }} (stub) – mnemograph{% endblock %}
+{% block content %}
+<h1>{{ title }} <span class="stub-badge">stub</span></h1>
+<p class="meta">No page has this title yet. It is linked from the pages and notes below.</p>
+{% if !backlinks.is_empty() %}
+<section><h2>Linked from</h2>{% call m::link_list(backlinks) %}{% endcall %}</section>
+{% endif %}
+{% if !notes.is_empty() %}
+<section><h2>Notes</h2>{% call m::note_list(notes) %}{% endcall %}</section>
+{% endif %}
+{% endblock %}

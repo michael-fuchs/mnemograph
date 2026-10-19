@@ -125,7 +125,7 @@ Bootstrap runs **only when the database is empty** (first start). Changing the f
 - **Access groups**: `Blacklist, Clients, Events, Generic, Groups, Roles, Secrets, Sessions, Scopes, UserAttributes, Users, Pam`.
 - **Rights**: `read, create, update, delete`. These map to GET, POST, PUT and DELETE.
 - **Header format**: `Authorization: API-Key <name>$<secret>`.
-- An API key cannot manage other API keys. API keys can only be created in the Admin UI or by bootstrap.
+- API keys are managed in the Admin UI, by bootstrap, or by an API key that holds the `ApiKeys` access group (corrected 2026-10-19, see §9.2).
 
 Tested `bootstrap/api_keys.json` [live]:
 
@@ -464,3 +464,130 @@ All variants serve the same JSON. Fields with these values [live]:
    - the token has `aud ∋ http://localhost:3000/mcp`.
 2. **Early refresh.** Find out whether Claude Code refreshes right after the code exchange. Watch the Rauthy logs with `disable_refresh_token_nbf = false`.
 3. **Token request.** Find out whether Claude Code sends `resource` on the token request (Rauthy logs, or a proxy).
+
+---
+
+## 9. Owner-only web UI login: groups, confidential client, ID token, logout (research, 2026-10-19)
+
+Facts for a server-rendered mnemograph web UI where mnemograph's backend is the OIDC client
+(authorization code + PKCE S256) and only members of the Rauthy group `mnemograph_owner` may log in.
+Same method as above: **[src]** = Rauthy source at tag `v0.37.1`; **[live]** = a throwaway
+`ghcr.io/sebadob/rauthy:0.37.1` on port 8190 (torn down afterwards), login through headless Chromium.
+The dev instance on 8180 was only read (GET).
+
+### 9.1 Groups and group membership via the API
+
+- **Access groups needed**: `Groups` (`read` to list, `create` to create) and `Users` (`read` to look up, `update` to change membership) [src: `src/api/src/groups.rs`, `src/api/src/users.rs`; live 403 messages, e.g. `"Bad permissions for given ApiKey. Needed: Groups / Read"`].
+- **List groups**: `GET /auth/v1/groups` → `[{"id":"…","name":"user"},{"id":"…","name":"admin"}, …]`. A fresh DB has `admin` and `user`.
+- **Create a group**: `POST /auth/v1/groups` with `{"group": "mnemograph_owner"}` (`meta` optional) → `200 {"id":"<24 chars>","name":"mnemograph_owner"}` [live].
+  - Name regex: `^[a-zA-Z0-9-_/,:*\s]{2,64}$` [src: `src/api_types/src/groups.rs`].
+  - Creating an existing name → `400 {"error":"BadRequest","message":"Group already exists"}` [live]. Idempotent scripts should check `GET /groups` first.
+- **Find a user**: `GET /auth/v1/users/email/admin@localhost` (`Users: read`) → the user incl. `id` and `"groups":["admin"]` [live].
+- **Add a user to a group: use `PATCH /auth/v1/users/{id}`**, not `PUT`.
+  - `PUT /users/{id}` takes a full `UpdateUserRequest` and replaces everything: required `email`, `roles`, `enabled`, `email_verified`; and **omitting `user_values` deletes the user's stored values** [src: `User::update`, users.rs ~1242–1330]. Avoid it.
+  - `PATCH` loads the current user from the DB, applies only the given keys and saves through the same code path [src: `User::patch` + `upd_req_from_db`, users.rs ~1070–1240].
+  - Body: `{"put":[{"key":"groups","value":["admin","mnemograph_owner"]}],"del":[]}`. **Both `put` and `del` are required** (without `del`: `400 Json deserialize error: missing field 'del'`) [live].
+  - The `groups` value **replaces the whole list**, so send existing groups + the new one (e.g. `jq '.groups + ["mnemograph_owner"] | unique'`).
+  - Unknown group names are **silently dropped**, not rejected (`Group::sanitize`) [src; live: `nope_group` vanished, 200]. Create the group first and check the response.
+  - Response: the updated user, `200` [live]. Password, roles and other fields stayed unchanged; the admin could log in with the old password afterwards [live].
+- **Declarative alternative (fresh DB only)**: `groups.json` in `bootstrap_dir` (`[{"name":"mnemograph_owner"}]`) creates the group. `users.json` *inserts* users with `groups`, so it can create a separate owner user but cannot add the bootstrap admin (`admin@localhost`) to a group [src: `migration/bootstrap/users.rs`].
+
+### 9.2 Changing API-key rights; bootstrap re-runs
+
+- **0.37.1 has an `ApiKeys` access group** (also `AuthProviders`) [src: `AccessGroup` in `src/data/src/entity/api_keys.rs`]: `GET /auth/v1/api_keys`, `POST /api_keys`, `PUT /api_keys/{name}`, `DELETE /api_keys/{name}`, `PUT /api_keys/{name}/secret` accept an API key with the matching `ApiKeys` right, or an admin session [src: `src/api/src/api_keys.rs`].
+  - `PUT /auth/v1/api_keys/{name}` body: `{"name":"<name>","exp":<unix|null>,"access":[{"group":"Groups","access_rights":["read","create"]}, …]}`. It replaces the access list; the secret stays the same [live: the upgraded key worked with its old secret].
+  - A key **without** `ApiKeys: update` cannot change itself: `403 "Needed: ApiKeys / Update"` [live]. The current dev key (`Clients` + `Scopes` only) therefore cannot be upgraded by API.
+  - The Admin UI (API Keys section, admin session) can edit an existing key's access rights [src: same handler, `validate_api_key_or_admin_session`].
+- **Bootstrap files are only read on an empty DB.** `migrate_init_prod` returns early if the `JWKS` table is non-empty; all bootstrap data (API keys, groups, users, scopes, clients) is applied only in that branch [src: `migration/bootstrap/mod.rs`]. Live: adding a key to `api_keys.json` and restarting did nothing (no "Initializing empty production database" log, key not listed).
+- **Options for an already-running dev instance whose key lacks rights:**
+  1. Reset: `docker compose -f dev/compose.yaml down -v && rm -r dev/rauthy`, then rerun the script. Loses only dev data (admin password, client config are regenerated). Simplest and fully scriptable.
+  2. Admin UI: log in at `http://localhost:8180/auth/v1/admin` → API Keys → `bootstrap` → add `Groups: read, create`, `Users: read, update`, `Secrets: read`. No data loss, one manual step.
+  - Detection: probe with `GET /groups` and `GET /users/email/admin@localhost` (and for a confidential client `POST /clients/{id}/secret`); a 403 body names the missing right.
+  - Future-proofing: giving the bootstrap key `ApiKeys: read, update` would let later script versions widen the key's rights themselves via `PUT /api_keys/bootstrap`. That is a self-escalating key; acceptable for local dev only.
+
+### 9.3 Group membership in tokens
+
+Live auth-code login as `admin@localhost` (in `admin` + `mnemograph_owner`), authorize request with `scope=openid` only; the client had `default_scopes: ["openid","email","groups"]`:
+
+```json
+// ID token header
+{"alg": "EdDSA", "kid": "…", "typ": "JWT"}
+// ID token payload
+{"iat": …, "nbf": …, "exp": …,                       // exp - iat = access_token_lifetime
+ "iss": "http://localhost:8190/auth/v1/",
+ "aud": "mnemograph-web", "sub": "<user id>", "typ": "Id", "azp": "mnemograph-web",
+ "scope": "email openid groups", "amr": ["pwd"], "auth_time": …, "at_hash": "…", "sid": "…",
+ "email": "admin@localhost", "email_verified": true, "nonce": "nonce-abc",
+ "roles": ["admin", "rauthy_admin"], "groups": ["admin", "mnemograph_owner"]}
+// access token payload (header typ "at+jwt")
+{…, "aud": "mnemograph-web", "typ": "Bearer", "azp": "mnemograph-web", "scope": "email openid groups",
+ "email": "admin@localhost", "email_verified": true,
+ "roles": ["admin", "rauthy_admin"], "groups": ["admin", "mnemograph_owner"]}
+```
+
+- **`groups`** is a JSON **array of group names**, in **both** ID and access token, present only if the granted scope contains `groups` [src: `build_id_token` / `build_access_token` in `src/service/src/token_set.rs`: `if scope.contains("groups")`; live].
+- **`default_scopes` suffice**: `groups` and `email` were added although only `openid` was requested [live]. The token response's `scope` was `"email openid groups"`.
+- `roles` is always present. `email`/`email_verified` need scope `email`; `name`, `given_name`, `family_name`, `locale`, `preferred_username` need scope `profile` [src].
+- **`aud`** is the plain string client id in the ID token (array only for ephemeral Solid clients) [src; live].
+- **`nonce`** is echoed when sent [live]. `sid` is the Rauthy session id.
+- **`at_hash` uses the hash of the client's `access_token_alg`**: for EdDSA it is **SHA-512** (left half, base64url) [src: `AtHash::build`, `AtHashAlg::try_from(client.access_token_alg)`; live: SHA-512 matched, SHA-256 did not]. RS256 → SHA-256. If the RP library mis-hashes for EdDSA, skip `at_hash` (optional in the code flow) or switch the client to RS256.
+- **ID token `typ` header is `JWT`** (access token: `at+jwt`) [src: `JwtHeaderType::Jwt`; live]. The `typ` *claim* is `"Id"`.
+- No `refresh_token` in the response unless `refresh_token` is in `flows_enabled` [live].
+
+### 9.4 Restricting login to the group inside Rauthy: `restrict_group_prefix`
+
+- Client field `restrict_group_prefix` (in `UpdateClientRequest`): if set, a user may only log in to this client if **any of their groups `starts_with` the prefix** [src: `Client::validate_user_groups`, clients.rs ~1687].
+- Checked at login (`authorize.rs`), on refresh (`validation.rs`), for the password grant and forward-auth [src].
+- Live: user `other@localhost` (group `user`) on a client with `"restrict_group_prefix":"mnemograph_owner"` → login refused **in Rauthy's login UI** ("Missing group membership for this login"); no redirect to the client. The member admin logged in normally.
+- It is a **prefix**, not an exact match (`mnemograph_owner_x` would pass). Keep the exact `groups` check in mnemograph too; the Rauthy check is defence in depth and avoids issuing tokens to non-owners at all.
+
+### 9.5 Web client: confidential + PKCE
+
+- **Both work; recommended: confidential + PKCE S256.** A backend client can keep a secret; Rauthy enforces PKCE independently of `confidential` via `challenges` [src: `validate_code_challenge`: with `challenges` set, a missing `code_challenge`/`code_challenge_method` is a 400 at authorize; token exchange checks `code_verifier`].
+- **Create** (`Clients: create, update`), two calls as in §3:
+  ```bash
+  POST /auth/v1/clients  {"id":"mnemograph-web","name":"mnemograph","confidential":true,
+    "redirect_uris":["http://localhost:8080/auth/callback"],
+    "post_logout_redirect_uris":["http://localhost:8080/"]}
+  PUT /auth/v1/clients/mnemograph-web  {
+    "name":"mnemograph","confidential":true,"enabled":true,
+    "redirect_uris":["http://localhost:8080/auth/callback"],
+    "post_logout_redirect_uris":["http://localhost:8080/"],
+    "flows_enabled":["authorization_code"],
+    "access_token_alg":"EdDSA","id_token_alg":"EdDSA",
+    "auth_code_lifetime":60,"access_token_lifetime":300,
+    "scopes":["openid","email","profile","groups"],
+    "default_scopes":["openid","email","groups"],
+    "challenges":["S256"],"force_mfa":false,
+    "restrict_group_prefix":"mnemograph_owner"}
+  ```
+  Both returned 200 [live]. `POST` with `confidential: true` generates the secret immediately [src: `Client::create`]. A `PUT` switching public → confidential generates a new one; confidential → public deletes it [src: `service/client.rs`].
+- **Read the secret**: **`POST /auth/v1/clients/{id}/secret`** (no body) with `Secrets: read` → `{"id":"mnemograph-web","confidential":true,"secret":"<64 chars>"}` [src: `get_client_secret`; live]. `GET` on that path is **404** (no route) [live]. For a public client the POST returns 404 "is a public client".
+- **Rotate**: `PUT /auth/v1/clients/{id}/secret` (`Secrets: update`), optional `{"cache_current_hours":1..24}` keeps the old secret valid meanwhile [src].
+- **Token endpoint auth**: `client_secret_basic` (`Authorization: Basic base64(client_id:secret)`) and `client_secret_post` (`client_id` + `client_secret` in the form) both returned 200 [live]. A Basic header wins over form fields; the header value is not URL-decoded, so keep ids/secrets URL-safe (they are: alnum secret) [src: `try_get_client_id_secret`].
+- Missing secret on a confidential client → `400 {"error":"BadRequest","message":"'client_secret' is missing"}` (Rauthy's error JSON, not RFC 6749 `invalid_client`) [live]. It is checked before the code is looked up, so the code is not consumed [src].
+- **Token request**: `grant_type=authorization_code&code=…&redirect_uri=http://localhost:8080/auth/callback&code_verifier=…` + client auth. `redirect_uri` must match the authorize request [src: `validate_redirect_uri_exact`].
+- **Callback** carries `code`, `state` and `iss` (`…?code=…&state=st123&iss=http%3A%2F%2Flocalhost%3A8190%2Fauth%2Fv1%2F`) [live]. Check `iss` against the issuer (RFC 9207).
+
+### 9.6 Logout (RP-initiated)
+
+- `end_session_endpoint`: `http://localhost:8180/auth/v1/oidc/logout` (dev instance discovery) [live]. `backchannel_logout_supported: true`, no front-channel logout.
+- `GET /auth/v1/oidc/logout?id_token_hint=<id_token>&post_logout_redirect_uri=http://localhost:8080/&state=<s>` with the browser's Rauthy session → Rauthy ends its session and redirects to **`http://localhost:8080/?state=<s>`** without a confirmation page [live; src: `get_logout` → `post_logout_handle` when `id_token_hint` is present]. The next authorize showed the login form again [live].
+- Without `id_token_hint` Rauthy shows its own logout confirmation page (session needed) [src].
+- `post_logout_redirect_uri` must be registered in the client's `post_logout_redirect_uris`: scheme, host and port must match and the URI must be **equal** (or match a trailing-`*` wildcard). RFC 8252 port relaxation does **not** apply here [src: `validate_post_logout_redirect_uri`]. Unregistered path or port → `400 "Invalid post_logout_redirect_uri"` [live].
+- Logging out of Rauthy does not end mnemograph's own session; clear mnemograph's cookie before redirecting. Back-channel logout (`backchannel_logout_uri` on the client) is available if Rauthy-initiated logouts should reach mnemograph.
+
+### 9.7 Redirect URI for the web client
+
+- Registered `http://localhost:8080/auth/callback`; the exact URI passed authorize and token exchange [live, with `rfc_8252_enable = true` as in dev].
+- With `rfc_8252_enable = true`, a loopback URI **also matches any other port** (§3), so on the dev instance `http://localhost:9999/auth/callback` would be accepted too. Harmless for dev; production (non-loopback host) always matches exactly.
+- `localhost` vs `127.0.0.1` are different hosts (§3): mnemograph must build its `redirect_uri` with the registered host.
+
+### 9.8 Implied script steps (`dev/setup-rauthy.sh`)
+
+1. Bootstrap key rights for new instances: add `{"group":"Groups","access_rights":["read","create"]}`, `{"group":"Users","access_rights":["read","update"]}`, `{"group":"Secrets","access_rights":["read"]}`.
+2. Probe `GET /groups`; on 403 print the two options from §9.2 (reset with `down -v`, or edit the key in the Admin UI) and exit.
+3. `GET /groups`; if no `mnemograph_owner`: `POST /groups {"group":"mnemograph_owner"}`.
+4. `GET /users/email/admin@localhost`; if `groups` lacks it: `PATCH /users/{id} {"put":[{"key":"groups","value":<groups + "mnemograph_owner">}],"del":[]}`.
+5. Create/update client `mnemograph-web` as in §9.5 (`POST` if `GET /clients/mnemograph-web` ≠ 200, then the full `PUT`).
+6. `POST /clients/mnemograph-web/secret` and write the secret to a git-ignored env file (e.g. `dev/rauthy/secrets.env` as `WEB_CLIENT_SECRET=…`) for `cargo run`.

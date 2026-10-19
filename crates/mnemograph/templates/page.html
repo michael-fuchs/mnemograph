@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{{ title }} – mnemograph{% endblock %}
+{% block content %}
+<article class="page">
+  <h1>{{ title }}</h1>
+  <p class="meta">
+    {% if let Some(t) = page_type %}<span class="type">{{ t }}</span>{% endif %}
+    revision {{ revision }} · updated {{ updated_at }} by {{ updated_by }} · created {{ created_at }}
+    {% if !aliases.is_empty() %}<br>also known as: {{ aliases.join(", ") }}{% endif %}
+  </p>
+  <div class="body">{{ body_html|safe }}</div>
+</article>
+
+<aside class="context">
+  {% if !links.is_empty() %}
+  <section><h2>Links</h2>{% call m::link_list(links) %}{% endcall %}</section>
+  {% endif %}
+  {% if !backlinks.is_empty() %}
+  <section><h2>Linked from</h2>{% call m::link_list(backlinks) %}{% endcall %}</section>
+  {% endif %}
+  {% if !notes.is_empty() %}
+  <section><h2>Notes</h2>{% call m::note_list(notes) %}{% endcall %}</section>
+  {% endif %}
+</aside>
+{% endblock %}

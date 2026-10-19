@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use mnemograph::web::login::LoginSettings;
 use mnemograph::{AppConfig, AuthSettings, Authenticator, WriteLimits};
 use mnemograph_core::Knowledge;
 use tokio_util::sync::CancellationToken;
@@ -89,6 +90,23 @@ struct ServeArgs {
         default_value = "mnemograph"
     )]
     required_scopes: Vec<String>,
+    /// Client ID of the web UI at the OIDC provider (for the owner's browser login).
+    #[arg(
+        long,
+        env = "MNEMOGRAPH_WEB_CLIENT_ID",
+        default_value = "mnemograph-web"
+    )]
+    web_client_id: String,
+    /// Secret of the web UI's client, if it is confidential; a public client uses PKCE alone.
+    #[arg(long, env = "MNEMOGRAPH_WEB_CLIENT_SECRET", hide_env_values = true)]
+    web_client_secret: Option<String>,
+    /// Only members of this group at the OIDC provider may log in to the web UI.
+    #[arg(
+        long,
+        env = "MNEMOGRAPH_OWNER_GROUP",
+        default_value = "mnemograph_owner"
+    )]
+    owner_group: String,
     /// Largest page body an agent may write, in bytes.
     #[arg(long, env = "MNEMOGRAPH_MAX_PAGE_BYTES", default_value_t = WriteLimits::default().max_page_bytes)]
     max_page_bytes: usize,
@@ -212,6 +230,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_page_bytes,
         max_note_bytes,
         writes_per_minute,
+        web_client_id,
+        web_client_secret,
+        owner_group,
     } = args;
     let public_url = reqwest::Url::parse(&public_url)
         .with_context(|| format!("invalid public URL {public_url:?}"))?;
@@ -252,6 +273,15 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         }
     };
 
+    let web_login = auth.as_ref().map(|authenticator| LoginSettings {
+        authenticator: authenticator.clone(),
+        client_id: web_client_id,
+        client_secret: web_client_secret,
+        redirect_uri: format!("{public_base}/auth/callback"),
+        owner_group,
+        secure_cookies: public_url.scheme() == "https",
+    });
+
     let mut allowed_hosts: Vec<String> =
         ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec();
     if let Some(host) = public_url.host_str() {
@@ -267,6 +297,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         AppConfig {
             auth,
             allowed_hosts,
+            web_login,
             limits: WriteLimits {
                 max_page_bytes,
                 max_note_bytes,

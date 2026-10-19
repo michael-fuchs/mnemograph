@@ -18,7 +18,7 @@ pub(crate) fn clean_title(title: &str) -> Result<String> {
 
 /// The key under which titles and aliases are compared: two titles with the same key name the
 /// same page.
-pub(crate) fn title_key(title: &str) -> String {
+pub fn title_key(title: &str) -> String {
     title
         .split_whitespace()
         .collect::<Vec<_>>()

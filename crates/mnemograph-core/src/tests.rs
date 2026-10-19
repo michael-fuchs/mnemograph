@@ -1242,3 +1242,50 @@ fn export_includes_authors() {
     let notes = std::fs::read_to_string(dir.path().join("out/notes.jsonl")).unwrap();
     assert!(notes.contains("\"author\":\"agent:test-agent\""), "{notes}");
 }
+
+// Sessions
+
+#[test]
+fn sessions_are_found_by_token_until_they_end() {
+    let knowledge = knowledge();
+    let owner = Session {
+        owner_id: "user-1".into(),
+        owner_name: "admin@localhost".into(),
+    };
+    let token = knowledge
+        .create_session(&owner, std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert!(token.len() >= 43, "256 bits of randomness");
+    assert_eq!(knowledge.session(&token).unwrap(), Some(owner));
+    assert_eq!(knowledge.session("guessed").unwrap(), None);
+
+    knowledge.end_session(&token).unwrap();
+    assert_eq!(knowledge.session(&token).unwrap(), None);
+}
+
+#[test]
+fn expired_sessions_are_not_found_and_tokens_are_not_stored() {
+    let knowledge = knowledge();
+    let owner = Session {
+        owner_id: "user-1".into(),
+        owner_name: "admin".into(),
+    };
+    let expired = knowledge
+        .create_session(&owner, std::time::Duration::from_secs(0))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert_eq!(knowledge.session(&expired).unwrap(), None);
+
+    let token = knowledge
+        .create_session(&owner, std::time::Duration::from_secs(60))
+        .unwrap();
+    let stored: Vec<String> = knowledge
+        .conn()
+        .prepare("SELECT token_hash FROM session")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(!stored.contains(&token));
+}

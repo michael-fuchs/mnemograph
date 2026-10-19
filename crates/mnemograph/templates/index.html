@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block content %}
+<h1>Pages</h1>
+{% if pages.is_empty() %}
+<p class="empty">No pages yet. Agents create them with <code>write_page</code>.</p>
+{% else %}
+<table class="pages">
+  <thead><tr><th>Title</th><th>Type</th><th>Updated</th><th>By</th></tr></thead>
+  <tbody>
+    {% for page in pages %}
+    <tr>
+      <td><a href="{{ page.url }}">{{ page.title }}</a></td>
+      <td>{% if let Some(t) = page.page_type %}<span class="type">{{ t }}</span>{% endif %}</td>
+      <td class="nowrap">{{ page.updated_at }}</td>
+      <td>{{ page.updated_by }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Recent notes</h2>
+{% if notes.is_empty() %}
+<p class="empty">No notes yet.</p>
+{% else %}
+{% call m::note_list(notes) %}{% endcall %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,54 @@
+:root {
+  --bg: #fdfdfc; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #2f5fb3; --stub: #b0452f; --code-bg: #f3f3ef;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181a; --fg: #e6e6e3; --muted: #9a9a95; --line: #333337;
+    --accent: #8fb0ef; --stub: #e58c75; --code-bg: #232327;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header.site {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.6rem 1rem; border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.session { display: flex; gap: 0.6rem; align-items: center; margin: 0; color: var(--muted); }
+.session button {
+  font: inherit; font-size: 0.9rem; padding: 0.2rem 0.7rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg);
+}
+main { max-width: 60rem; margin: 0 auto; padding: 1rem 1rem 4rem; }
+a { color: var(--accent); }
+a.stub, .body a[title="Not written yet"] { color: var(--stub); text-decoration-style: dashed; }
+h1 { margin: 0.8rem 0 0.4rem; line-height: 1.25; }
+h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
+.meta, .empty { color: var(--muted); font-size: 0.9rem; }
+.type, .stub-badge {
+  display: inline-block; padding: 0 0.5rem; border-radius: 999px; font-size: 0.8rem;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.stub-badge { color: var(--stub); border-color: var(--stub); vertical-align: middle; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); }
+th { font-size: 0.85rem; color: var(--muted); font-weight: 500; }
+.nowrap { white-space: nowrap; }
+pre, code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9em; }
+pre { background: var(--code-bg); padding: 0.8rem; overflow-x: auto; border-radius: 6px; }
+pre.mermaid { background: transparent; text-align: center; }
+:not(pre) > code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 4px; }
+blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid var(--line); color: var(--muted); }
+.markdown-alert { border-left: 4px solid var(--accent); padding: 0.4rem 1rem; margin: 1rem 0; }
+.markdown-alert-title { font-weight: 600; margin: 0; }
+.markdown-alert-warning, .markdown-alert-caution { border-color: var(--stub); }
+ul.links { padding-left: 1.2rem; }
+ol.notes { list-style: none; padding: 0; }
+.note { border-top: 1px solid var(--line); padding: 0.6rem 0; }
+.note .body > :first-child { margin-top: 0.2rem; }
+.note .body > :last-child { margin-bottom: 0; }
+.context { margin-top: 2.5rem; border-top: 2px solid var(--line); }

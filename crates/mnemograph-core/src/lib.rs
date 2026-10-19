@@ -12,6 +12,7 @@ mod notes;
 mod related;
 mod schema;
 mod search;
+mod sessions;
 mod title;
 
 use std::path::Path;
@@ -24,9 +25,12 @@ pub use delete::DeletedPage;
 pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{MAX_HOPS, Related};
+pub use sessions::Session;
 
 use search::{IndexedText, Item, SearchIndex};
-use title::{clean_title, title_key};
+use title::clean_title;
+/// The key under which titles and aliases are compared (case-insensitive, whitespace collapsed).
+pub use title::title_key;
 
 /// Page types allowed when none are configured.
 pub const DEFAULT_PAGE_TYPES: &[&str] = &[

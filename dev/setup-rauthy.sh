@@ -2,13 +2,17 @@
 # Sets up Rauthy locally for mnemograph development:
 #   1. generates dev/rauthy/config.toml and the bootstrap API key (once; git-ignored),
 #   2. starts Rauthy on http://localhost:8180,
-#   3. creates the scope "mnemograph" and the pre-registered public client "claude-code".
+#   3. creates the scope "mnemograph" and the pre-registered public client "claude-code",
+#   4. creates the owner group "mnemograph_owner" with the admin in it and the web UI's
+#      confidential client "mnemograph-web"; its secret goes to dev/rauthy/mnemograph.env.
 # Safe to run again: existing config, scope and client are kept or updated.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 RAUTHY_URL="http://localhost:8180"
-MNEMOGRAPH_RESOURCE="${MNEMOGRAPH_RESOURCE:-http://localhost:8080/mcp}"
+MNEMOGRAPH_URL="${MNEMOGRAPH_URL:-http://localhost:8080}"
+MNEMOGRAPH_RESOURCE="$MNEMOGRAPH_URL/mcp"
+OWNER_GROUP="mnemograph_owner"
 CONFIG_DIR="rauthy"
 SECRETS="$CONFIG_DIR/secrets.env"
 
@@ -70,7 +74,10 @@ CONFIG_EOF
     "secret": { "Plain": "$api_secret" },
     "access": [
       { "group": "Clients", "access_rights": ["read", "create", "update", "delete"] },
-      { "group": "Scopes", "access_rights": ["read", "create", "update", "delete"] }
+      { "group": "Scopes", "access_rights": ["read", "create", "update", "delete"] },
+      { "group": "Groups", "access_rights": ["read", "create"] },
+      { "group": "Users", "access_rights": ["read", "update"] },
+      { "group": "Secrets", "access_rights": ["read"] }
     ]
   }
 ]
@@ -138,15 +145,85 @@ client="$(jq -n --arg resource "$MNEMOGRAPH_RESOURCE" '{
 status="$(api PUT /clients/claude-code "$client")"
 [[ "$status" == 200 ]] || { echo "configuring the client failed: HTTP $status" >&2; exit 1; }
 
+# The web UI: only members of the owner group may log in.
+if [[ "$(api GET /groups)" != 200 ]]; then
+  cat >&2 <<HINT
+The client for agents (claude-code) is ready, but the web UI needs more rights for the
+bootstrap API key than this Rauthy instance gave it (it was set up by an older version of this
+script, and Rauthy reads bootstrap files only on its very first start). Either
+  - start over:  docker compose -f dev/compose.yaml down -v && rm -r dev/rauthy
+    then run this script again and log in again with Claude Code, or
+  - in the admin UI ($RAUTHY_URL/auth/v1/admin, API Keys -> bootstrap) add the rights
+    Groups: read, create; Users: read, update; Secrets: read; then run this script again.
+HINT
+  exit 1
+fi
+
+groups="$(curl -sf "$RAUTHY_URL/auth/v1/groups" -H "Authorization: API-Key $API_KEY")"
+if ! jq -e --arg g "$OWNER_GROUP" '.[] | select(.name == $g)' <<< "$groups" > /dev/null; then
+  status="$(api POST /groups "$(jq -n --arg g "$OWNER_GROUP" '{group: $g}')")"
+  [[ "$status" == 200 ]] || { echo "creating the group failed: HTTP $status" >&2; exit 1; }
+fi
+
+admin="$(curl -sf "$RAUTHY_URL/auth/v1/users/email/$ADMIN_EMAIL" -H "Authorization: API-Key $API_KEY")"
+if ! jq -e --arg g "$OWNER_GROUP" '.groups | index($g)' <<< "$admin" > /dev/null; then
+  # PATCH, not PUT: a PUT replaces the whole user. The value replaces the group list.
+  patch="$(jq --arg g "$OWNER_GROUP" '{put: [{key: "groups", value: (.groups + [$g])}], del: []}' <<< "$admin")"
+  status="$(api PATCH "/users/$(jq -r .id <<< "$admin")" "$patch")"
+  [[ "$status" == 200 ]] || { echo "adding the admin to $OWNER_GROUP failed: HTTP $status" >&2; exit 1; }
+fi
+
+# Confidential client for the web UI's server-side login, with PKCE as well. Rauthy itself
+# refuses users outside the owner group (restrict_group_prefix); mnemograph checks it exactly.
+if [[ "$(api GET /clients/mnemograph-web)" != 200 ]]; then
+  status="$(api POST /clients "$(jq -n --arg url "$MNEMOGRAPH_URL" '{
+    id: "mnemograph-web", name: "mnemograph", confidential: true,
+    redirect_uris: [$url + "/auth/callback"], post_logout_redirect_uris: [$url + "/"]}')")"
+  [[ "$status" == 200 ]] || { echo "creating the web client failed: HTTP $status" >&2; exit 1; }
+fi
+web_client="$(jq -n --arg url "$MNEMOGRAPH_URL" --arg g "$OWNER_GROUP" '{
+  name: "mnemograph",
+  confidential: true,
+  enabled: true,
+  redirect_uris: [$url + "/auth/callback"],
+  post_logout_redirect_uris: [$url + "/"],
+  flows_enabled: ["authorization_code"],
+  access_token_alg: "EdDSA",
+  id_token_alg: "EdDSA",
+  auth_code_lifetime: 60,
+  access_token_lifetime: 300,
+  scopes: ["openid", "email", "profile", "groups"],
+  default_scopes: ["openid", "email", "groups"],
+  challenges: ["S256"],
+  force_mfa: false,
+  restrict_group_prefix: $g
+}')"
+status="$(api PUT /clients/mnemograph-web "$web_client")"
+[[ "$status" == 200 ]] || { echo "configuring the web client failed: HTTP $status" >&2; exit 1; }
+web_secret="$(curl -sf -X POST "$RAUTHY_URL/auth/v1/clients/mnemograph-web/secret" \
+  -H "Authorization: API-Key $API_KEY" | jq -r .secret)"
+[[ -n "$web_secret" && "$web_secret" != null ]] || { echo "reading the web client secret failed" >&2; exit 1; }
+# Everything `mnemograph serve` needs, without Rauthy's own secrets.
+umask 077
+cat > "$CONFIG_DIR/mnemograph.env" <<ENV_EOF
+MNEMOGRAPH_OIDC_ISSUER=$RAUTHY_URL/auth/v1/
+MNEMOGRAPH_PUBLIC_URL=$MNEMOGRAPH_URL
+MNEMOGRAPH_WEB_CLIENT_ID=mnemograph-web
+MNEMOGRAPH_WEB_CLIENT_SECRET=$web_secret
+MNEMOGRAPH_OWNER_GROUP=$OWNER_GROUP
+ENV_EOF
+
 cat <<DONE
 
 Rauthy is ready at $RAUTHY_URL (admin UI: $RAUTHY_URL/auth/v1/admin)
   admin login:  $ADMIN_EMAIL / $ADMIN_PASSWORD   (also in dev/$SECRETS)
   issuer:       $RAUTHY_URL/auth/v1/
-  client:       claude-code (public, PKCE), resource $MNEMOGRAPH_RESOURCE
+  clients:      claude-code (public, PKCE; agents), mnemograph-web (confidential, PKCE; web UI)
+  owner group:  $OWNER_GROUP (contains $ADMIN_EMAIL)
 
 Next:
-  cargo run -- serve --oidc-issuer $RAUTHY_URL/auth/v1/
+  set -a; . dev/rauthy/mnemograph.env; set +a; cargo run -- serve
   claude mcp add --transport http --client-id claude-code mnemograph $MNEMOGRAPH_RESOURCE
   claude mcp login mnemograph      # or /mcp inside a Claude Code session
+  open $MNEMOGRAPH_URL/ in the browser and log in as $ADMIN_EMAIL
 DONE

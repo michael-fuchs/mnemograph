@@ -66,6 +66,7 @@ impl AuthSettings {
 pub struct Authenticator {
     settings: AuthSettings,
     keys: KeySource,
+    endpoints: Option<ProviderEndpoints>,
 }
 
 enum KeySource {
@@ -135,6 +136,29 @@ mod tests {
 struct Discovery {
     issuer: String,
     jwks_uri: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    end_session_endpoint: Option<String>,
+}
+
+/// The provider endpoints the browser login uses.
+#[derive(Debug, Clone)]
+pub struct ProviderEndpoints {
+    pub authorization: String,
+    pub token: String,
+    pub end_session: Option<String>,
+}
+
+/// What mnemograph reads from an ID token after verifying it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdTokenClaims {
+    pub sub: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 impl Authenticator {
@@ -167,6 +191,11 @@ impl Authenticator {
         settings.issuer = discovery.issuer;
         let authenticator = Self {
             settings,
+            endpoints: Some(ProviderEndpoints {
+                authorization: discovery.authorization_endpoint,
+                token: discovery.token_endpoint,
+                end_session: discovery.end_session_endpoint,
+            }),
             keys: KeySource::Remote {
                 jwks_url: discovery.jwks_uri,
                 http,
@@ -185,7 +214,49 @@ impl Authenticator {
         Self {
             settings,
             keys: KeySource::Fixed(keys),
+            endpoints: None,
         }
+    }
+
+    /// The provider's endpoints, if they were discovered.
+    pub fn endpoints(&self) -> Option<&ProviderEndpoints> {
+        self.endpoints.as_ref()
+    }
+
+    /// Verifies an ID token from the browser login: signature, issuer, audience (the web
+    /// client's ID) and expiry. The caller checks the nonce.
+    pub async fn verify_id_token(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> Result<IdTokenClaims, AuthError> {
+        let invalid = |reason: &str| AuthError::InvalidToken(reason.to_owned());
+        let header = jsonwebtoken::decode_header(token).map_err(|e| invalid(&e.to_string()))?;
+        if header
+            .typ
+            .as_deref()
+            .is_some_and(|typ| typ.eq_ignore_ascii_case(ACCESS_TOKEN_TYPE))
+        {
+            return Err(invalid("an access token is not an ID token"));
+        }
+        let kid = header.kid.ok_or_else(|| invalid("no key ID"))?;
+        let (key, algorithm) = self
+            .key(&kid)
+            .await
+            .ok_or_else(|| invalid("unknown signing key"))?;
+        if header.alg != algorithm {
+            return Err(invalid("algorithm does not match the signing key"));
+        }
+        let mut validation = Validation::new(algorithm);
+        validation.set_issuer(&[&self.settings.issuer]);
+        validation.set_audience(&[client_id]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        validation.leeway = CLOCK_LEEWAY_SECS;
+        Ok(
+            jsonwebtoken::decode::<IdTokenClaims>(token, &key, &validation)
+                .map_err(|e| invalid(&e.to_string()))?
+                .claims,
+        )
     }
 
     pub fn settings(&self) -> &AuthSettings {

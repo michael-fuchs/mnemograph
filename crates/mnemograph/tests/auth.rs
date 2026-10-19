@@ -99,6 +99,7 @@ impl TestServer {
                 auth: Some(Arc::new(authenticator)),
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
+                web_login: None,
                 shutdown: shutdown.child_token(),
             },
         );
