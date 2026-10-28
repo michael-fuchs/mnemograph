@@ -102,6 +102,12 @@ Use it instead of local memory files.
 - Keep durable knowledge in pages (`write_page`); update existing pages instead of creating near-duplicates.
 ```
 
+### Filing conventions
+
+How knowledge is structured (hub pages per project with a timeline, decision pages, notes versus pages) is up to you, so it lives in mnemograph itself: on the page **Using mnemograph**. As soon as that page exists, the instructions every agent receives on connecting tell it to read the page before its first write; renaming the page keeps working, since the old title stays an alias. Edit it like any other page to change the conventions.
+
+A fresh installation has no such page. [`docs/using-mnemograph.md`](docs/using-mnemograph.md) is a starting point: ask an agent to create the page from it.
+
 ## Container image
 
 Every push to `main` builds a public image, `ghcr.io/michael-fuchs/mnemograph`, tagged with the branch and the commit (`main`, `sha-<commit>`); version tags `v*` add the version. Pin it by digest when deploying.

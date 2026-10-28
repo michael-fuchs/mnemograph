@@ -17,13 +17,19 @@ use serde::{Deserialize, Serialize};
 use crate::auth::Identity;
 use crate::limits::Limiter;
 
-/// Sent to agents when they connect; tells them what mnemograph is and how to work with it.
-const INSTRUCTIONS: &str = "\
+/// Sent to agents when they connect, before the usage page hint: what mnemograph is.
+const ABOUT: &str = "\
 mnemograph is the long-term memory shared by its owner and their AI agents. It holds:
 - pages: one per subject (a project, technology, decision, person, tool or concept), identified by a \
 case-insensitive title, optionally with aliases and a page type;
-- notes: short, timestamped, append-only records that link to the pages they concern.
+- notes: short, timestamped, append-only records that link to the pages they concern.";
 
+/// The page with the owner's filing conventions. The instructions point agents to it while it
+/// exists (by title or alias), so a fresh installation never sends them to a missing page.
+pub const USAGE_PAGE: &str = "Using mnemograph";
+
+/// Sent to agents when they connect, after the usage page hint: how to work with mnemograph.
+const INSTRUCTIONS: &str = "\
 How to work with it:
 1. Before starting a task, search for its subject and for the project you work on, and read the \
 pages you find. read_page shows a page's links, backlinks and recent notes; related shows what is \
@@ -419,6 +425,24 @@ impl McpServer {
     fn changed(&self) {
         self.changes.send_modify(|count| *count += 1);
     }
+
+    /// Points agents to the usage page by its current title, or nothing while it doesn't exist.
+    fn usage_hint(&self) -> String {
+        match self.knowledge.page(USAGE_PAGE) {
+            Ok(Some(page)) => format!(
+                "Start here: the page \"{}\" holds the owner's conventions for filing knowledge \
+                 (hub pages, decision pages, notes versus pages). Read it with read_page at the \
+                 start of a session, before your first write, and follow it together with the \
+                 rules below.\n\n",
+                page.title
+            ),
+            Ok(None) => String::new(),
+            Err(error) => {
+                tracing::warn!(%error, "could not look up the usage page");
+                String::new()
+            }
+        }
+    }
 }
 
 #[tool_handler]
@@ -427,7 +451,8 @@ impl ServerHandler for McpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mnemograph", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\nAllowed page types: {}.",
+                "{ABOUT}\n\n{}{INSTRUCTIONS}\n\nAllowed page types: {}.",
+                self.usage_hint(),
                 self.knowledge.page_types().join(", ")
             ))
     }
