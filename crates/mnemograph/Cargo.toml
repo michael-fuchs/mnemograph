@@ -31,6 +31,8 @@ percent-encoding = "2"
 rand = "0.9"
 base64 = "0.23.1"
 sha2 = "0.10"
+datastar = { version = "0.4", features = ["axum"] }
+futures = "0.3"
 
 [dev-dependencies]
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem", "rand_core"] }

@@ -4,7 +4,7 @@ A lean, self-hosted knowledge base that is both a human-readable wiki and a mach
 
 ## Status
 
-Planning phase — no code yet. The current plan is `docs/plans/mnemograph-v1.md`; it supersedes `docs/plans/mnemograph-initial.md` where they disagree (the initial plan remains as background). Vocabulary is in `GLOSSARY.md`, decisions with trade-offs in `docs/adr/`, and sourced library facts in `docs/research/`. `Scratch.md` is a private, git-ignored notes file. When ideas are refined, update the plan documents under `docs/plans/` rather than scattering decisions elsewhere.
+v1 is implemented for local use (agents via MCP with OAuth, owner web UI, CLI); see `README.md` for running it and `dev/setup-rauthy.sh` for the local identity provider. Deployment on the server is not done yet. The plan is `docs/plans/mnemograph-v1.md`; it supersedes `docs/plans/mnemograph-initial.md` where they disagree (the initial plan remains as background). Vocabulary is in `GLOSSARY.md`, decisions with trade-offs in `docs/adr/`, and sourced library facts in `docs/research/`. `Scratch.md` is a private, git-ignored notes file. When ideas are refined, update the plan documents under `docs/plans/` rather than scattering decisions elsewhere.
 
 ## Intended architecture (v1)
 

@@ -9,6 +9,9 @@
 <body>
   <header class="site">
     <a class="brand" href="/">mnemograph</a>
+    <form class="search" method="get" action="/search" role="search">
+      <input type="search" name="q" value="{{ header.query }}" placeholder="Search pages and notes" aria-label="Search">
+    </form>
     {% if let Some(owner) = header.owner_name %}
     <form class="session" method="post" action="/logout">
       <span>{{ owner }}</span>
@@ -16,9 +19,13 @@
     </form>
     {% endif %}
   </header>
-  <main>
+  <main id="content">
     {% block content %}{% endblock %}
   </main>
+  {% if header.live.is_some() %}
+  <div data-init="{{ header.live_request() }}"></div>
+  <script type="module" src="/assets/datastar.js"></script>
+  {% endif %}
   {% if has_mermaid %}
   <script src="/assets/mermaid.min.js"></script>
   <script>

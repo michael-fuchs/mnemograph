@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Search – mnemograph{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form class="search-page" method="get" action="/search">
+  <input type="search" name="q" value="{{ header.query }}" placeholder="Words to search for" aria-label="Search" autofocus>
+  <select name="type" aria-label="Page type">
+    <option value="">pages and notes</option>
+    {% for t in page_types %}
+    <option value="{{ t }}"{% if *t == page_type %} selected{% endif %}>only {{ t }} pages</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Search</button>
+</form>
+{% if let Some(error) = error %}
+<p class="error">{{ error }}</p>
+{% else if searched %}
+{% if hits.is_empty() %}
+<p class="empty">Nothing found.</p>
+{% else %}
+<ol class="hits">
+  {% for hit in hits %}
+  <li class="hit {{ hit.kind }}">
+    <a href="{{ hit.url }}">{{ hit.title }}</a>
+    {% if let Some(t) = hit.page_type %}<span class="type">{{ t }}</span>{% endif %}
+    {% if !hit.meta.is_empty() %}<span class="meta">{{ hit.meta }}</span>{% endif %}
+    <p class="snippet">{{ hit.snippet_html|safe }}</p>
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+{% endif %}
+{% endblock %}

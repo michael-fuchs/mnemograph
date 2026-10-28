@@ -44,12 +44,24 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(config.allowed_hosts)
-        .with_cancellation_token(config.shutdown);
-    let web = web::router(knowledge.clone(), config.web_login);
+        .with_cancellation_token(config.shutdown.clone());
+    let changes = Arc::new(tokio::sync::watch::Sender::new(0u64));
+    let web = web::router(
+        knowledge.clone(),
+        config.web_login,
+        changes.subscribe(),
+        config.shutdown.clone(),
+    );
     let mcp: StreamableHttpService<McpServer, LocalSessionManager> = StreamableHttpService::new(
         {
             let limiter = Arc::new(limits::Limiter::new(config.limits));
-            move || Ok(McpServer::new(knowledge.clone(), limiter.clone()))
+            move || {
+                Ok(McpServer::new(
+                    knowledge.clone(),
+                    limiter.clone(),
+                    changes.clone(),
+                ))
+            }
         },
         Default::default(),
         mcp_config,
