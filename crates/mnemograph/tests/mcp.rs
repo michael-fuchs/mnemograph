@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 struct TestServer {
     client: RunningService<RoleClient, ()>,
+    addr: std::net::SocketAddr,
     shutdown: CancellationToken,
     _dir: tempfile::TempDir,
 }
@@ -50,10 +51,10 @@ impl TestServer {
             }
         });
 
-        let transport = StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
-        let client = ().serve(transport).await.unwrap();
+        let client = connect(addr).await;
         Self {
             client,
+            addr,
             shutdown,
             _dir: dir,
         }
@@ -66,6 +67,11 @@ impl TestServer {
             .await
             .unwrap()
     }
+}
+
+async fn connect(addr: std::net::SocketAddr) -> RunningService<RoleClient, ()> {
+    let transport = StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
+    ().serve(transport).await.unwrap()
 }
 
 impl Drop for TestServer {
@@ -134,6 +140,48 @@ async fn server_lists_its_tools_and_instructions() {
         );
     }
     assert!(instructions.contains("You cannot delete anything"));
+}
+
+#[tokio::test]
+async fn instructions_point_to_the_usage_page_once_it_exists() {
+    let server = TestServer::start().await;
+    let instructions = |client: &RunningService<RoleClient, ()>| {
+        client
+            .peer_info()
+            .unwrap()
+            .instructions
+            .clone()
+            .unwrap_or_default()
+    };
+    assert!(!instructions(&server.client).contains("Start here"));
+
+    // Renamed away from the default title: the hint follows the page via its alias.
+    let created = server
+        .call(
+            "write_page",
+            json!({ "title": "Using mnemograph", "body": "Hub pages first." }),
+        )
+        .await;
+    let revision = structured(&created)["revision"].clone();
+    server
+        .call(
+            "write_page",
+            json!({
+                "title": "Using mnemograph",
+                "body": "Hub pages first.",
+                "base_revision": revision,
+                "new_title": "Filing conventions",
+            }),
+        )
+        .await;
+
+    let client = connect(server.addr).await;
+    let text = instructions(&client);
+    assert!(
+        text.contains(r#"Start here: the page "Filing conventions""#),
+        "{text}"
+    );
+    assert!(text.find("Start here") < text.find("How to work with it"));
 }
 
 #[tokio::test]
