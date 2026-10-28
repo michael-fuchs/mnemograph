@@ -71,7 +71,7 @@ Read-only: browse pages, notes, links, backlinks and stubs; search; view revisio
 
 - **Crates:** `mnemograph-core` (domain and storage behind a deep interface) and `mnemograph` (binary: axum, MCP, web UI, auth, CLI). Split further only when a seam actually hurts.
 - **Libraries:** `axum` 0.8, `tokio`, `tower`, `rmcp` 3.5, `rusqlite` (bundled), `rusqlite_migration`, `tantivy` 0.27, `comrak`, `jsonwebtoken` 11, `openidconnect` 4, `tower-sessions` (SQLite store), `askama` 0.16 + `askama_web`, `datastar` (Rust SDK), `serde`, `tracing`, `clap`, `thiserror`/`anyhow`.
-- **CI:** GitHub Actions running fmt, clippy and tests; integration tests against a temporary SQLite database. The Dockerfile waits for the deployment phase.
+- **CI:** GitHub Actions running fmt, clippy and tests; integration tests against a temporary SQLite database. A Dockerfile and an image workflow publish to ghcr.io.
 
 Version facts and sources: `docs/research/2026-10-initial-stack-facts.md`, `docs/research/2026-10-storage-options.md`.
 
