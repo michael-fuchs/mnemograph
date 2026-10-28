@@ -102,6 +102,19 @@ Use it instead of local memory files.
 - Keep durable knowledge in pages (`write_page`); update existing pages instead of creating near-duplicates.
 ```
 
+## Container image
+
+Every push to `main` builds a public image, `ghcr.io/michael-fuchs/mnemograph`, tagged with the branch and the commit (`main`, `sha-<commit>`); version tags `v*` add the version. Pin it by digest when deploying.
+
+The image is based on distroless (glibc, with CA certificates), runs as the non-root user 65532 and needs no capabilities. The database and the search index live in the volume `/data`, which must be writable by that user; everything else can be read-only. It listens on `0.0.0.0:8080` and, like outside a container, refuses to do so without `MNEMOGRAPH_OIDC_ISSUER`. Configure it with the environment variables above; the issuer is the exact `issuer` value of the provider's discovery document (for Rauthy this ends in `/auth/v1/`).
+
+```sh
+docker build -t mnemograph .
+docker run --rm -v mnemograph-data:/data -p 127.0.0.1:8080:8080 mnemograph   # loopback only: needs auth settings to listen on 0.0.0.0
+```
+
+The CLI commands run in the same image, with the server stopped: `docker run --rm -v mnemograph-data:/data mnemograph export /data/export`.
+
 ## Development
 
 ```sh
