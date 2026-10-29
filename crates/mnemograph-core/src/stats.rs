@@ -1,6 +1,8 @@
 //! Statistics about the knowledge, for the owner's dashboard.
 
-use crate::{GraphNode, Knowledge, RESOLVED_KEYS, Result};
+use std::collections::HashMap;
+
+use crate::{Author, GraphNode, Knowledge, RESOLVED_KEYS, Result};
 
 /// How much knowledge there is now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,7 +25,119 @@ pub struct Week {
     pub notes: u32,
 }
 
+/// What one author wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorActivity {
+    /// `None` for revisions and notes written before authors were recorded.
+    pub author: Option<Author>,
+    pub revisions: u32,
+    pub notes: u32,
+    /// When the author's first and latest revision or note was written.
+    pub first: String,
+    pub last: String,
+}
+
+/// Revisions plus notes written per week, per author.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WeeklyActivity {
+    /// The Mondays the weeks start on, `YYYY-MM-DD`, from the first write to the current week.
+    pub weeks: Vec<String>,
+    /// Each author with one count per week, in the order of [`Knowledge::author_activity`].
+    pub authors: Vec<(Option<Author>, Vec<u32>)>,
+}
+
+/// Revisions and notes with their author and time, for a `WITH` clause.
+const WRITES: &str = "write (author, created_at, revision, note) AS ( \
+       SELECT author, created_at, 1, 0 FROM revision \
+       UNION ALL SELECT author, created_at, 0, 1 FROM note)";
+
 impl Knowledge {
+    /// Everyone who wrote revisions or notes, most writes first, then by latest write.
+    pub fn author_activity(&self) -> Result<Vec<AuthorActivity>> {
+        let conn = self.conn();
+        let mut query = conn.prepare(&format!(
+            "WITH {WRITES} \
+             SELECT author, sum(revision), sum(note), min(created_at), max(created_at) \
+             FROM write GROUP BY author \
+             ORDER BY count(*) DESC, max(created_at) DESC"
+        ))?;
+        let activity = query
+            .query_map([], |row| {
+                let author: Option<String> = row.get(0)?;
+                Ok(AuthorActivity {
+                    author: author.as_deref().and_then(Author::parse),
+                    revisions: row.get(1)?,
+                    notes: row.get(2)?,
+                    first: row.get(3)?,
+                    last: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(activity)
+    }
+
+    /// Revisions plus notes per week and author, from the week of the first write to the
+    /// current week; empty if nothing was written.
+    pub fn weekly_activity(&self) -> Result<WeeklyActivity> {
+        self.weekly_activity_until("now")
+    }
+
+    /// [`Knowledge::weekly_activity`] up to the week of `until` (an SQLite date such as `now`).
+    pub(crate) fn weekly_activity_until(&self, until: &str) -> Result<WeeklyActivity> {
+        let order: Vec<Option<String>> = self
+            .author_activity()?
+            .into_iter()
+            .map(|a| a.author.map(|author| author.to_string()))
+            .collect();
+        let conn = self.conn();
+        let mut weeks_query = conn.prepare(&format!(
+            "WITH RECURSIVE {WRITES}, \
+               bound (first, last) AS ( \
+                 SELECT min(date(created_at, 'weekday 0', '-6 days')), \
+                        max(max(date(created_at, 'weekday 0', '-6 days')), \
+                            date(?1, 'weekday 0', '-6 days')) FROM write), \
+               weeks (week) AS ( \
+                 SELECT first FROM bound \
+                 UNION ALL SELECT date(week, '+7 days') FROM weeks, bound WHERE week < bound.last) \
+             SELECT week FROM weeks WHERE week IS NOT NULL"
+        ))?;
+        let weeks: Vec<String> = weeks_query
+            .query_map([until], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if weeks.is_empty() {
+            return Ok(WeeklyActivity::default());
+        }
+        let position: HashMap<&str, usize> = weeks
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.as_str(), i))
+            .collect();
+        let row_of: HashMap<&Option<String>, usize> =
+            order.iter().enumerate().map(|(i, a)| (a, i)).collect();
+        let mut counts = vec![vec![0u32; weeks.len()]; order.len()];
+        let mut query = conn.prepare(&format!(
+            "WITH {WRITES} \
+             SELECT author, date(created_at, 'weekday 0', '-6 days'), count(*) FROM write \
+             GROUP BY 1, 2"
+        ))?;
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            let author: Option<String> = row.get(0)?;
+            let week: String = row.get(1)?;
+            if let (Some(&a), Some(&w)) = (row_of.get(&author), position.get(week.as_str())) {
+                counts[a][w] = row.get(2)?;
+            }
+        }
+        Ok(WeeklyActivity {
+            authors: order
+                .iter()
+                .map(|author| author.as_deref().and_then(Author::parse))
+                .zip(counts)
+                .collect(),
+            weeks,
+        })
+    }
+
     /// Counts pages, stubs, links, notes and revisions.
     pub fn totals(&self) -> Result<Totals> {
         let conn = self.conn();

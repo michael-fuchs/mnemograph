@@ -465,4 +465,13 @@ async fn the_dashboard_shows_totals_growth_and_link_structure() {
         "{html}"
     );
     assert!(html.contains("data-init=\"@get(&#39;/live?view=%2Fstats&#39;)\""));
+    // Agents are anonymous here (no authentication): four revisions and one note.
+    assert!(
+        html.contains("anonymous (5)"),
+        "activity chart legend: {html}"
+    );
+    assert!(
+        html.contains("<tr><td class=\"nowrap\">anonymous</td><td class=\"num\">4</td><td class=\"num\">1</td>"),
+        "{html}"
+    );
 }

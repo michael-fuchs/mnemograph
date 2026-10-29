@@ -20,6 +20,26 @@
   {% endif %}
 </section>
 
+<section>
+  <h2>Activity</h2>
+  {% if let Some(html) = activity_html %}
+  {{ html|safe }}
+  <p class="meta">Revisions and notes written per week. The number after each author is their latest week.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Author</th><th class="num">Revisions</th><th class="num">Notes</th><th>First</th><th>Latest</th></tr></thead>
+    <tbody>
+      {% for row in authors %}
+      <tr><td class="nowrap">{{ row.author }}</td><td class="num">{{ row.revisions }}</td><td class="num">{{ row.notes }}</td><td class="nowrap">{{ row.first }}</td><td class="nowrap">{{ row.last }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">Nothing written yet.</p>
+  {% endif %}
+</section>
+
 <div class="columns">
   <section>
     <h2>Most-linked pages</h2>

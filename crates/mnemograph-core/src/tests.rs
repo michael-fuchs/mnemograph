@@ -1658,3 +1658,110 @@ fn most_linked_and_orphaned_pages() {
         .collect();
     assert_eq!(orphans, ["Alone", "zeta"]);
 }
+
+#[test]
+fn activity_per_author_counts_revisions_and_notes() {
+    let knowledge = knowledge();
+    assert!(knowledge.author_activity().unwrap().is_empty());
+    assert_eq!(
+        knowledge.weekly_activity_until("2026-10-29").unwrap(),
+        WeeklyActivity::default()
+    );
+
+    let claude = Author::Agent("claude-code".into());
+    let vibe = Author::Agent("vibe".into());
+    let page = knowledge
+        .write_page("A", "one", None, PageChanges::default(), &claude)
+        .unwrap();
+    knowledge
+        .write_page(
+            "A",
+            "two",
+            Some(page.revision),
+            PageChanges::default(),
+            &claude,
+        )
+        .unwrap();
+    knowledge.add_note("from claude", &claude).unwrap();
+    knowledge.add_note("from vibe", &vibe).unwrap();
+    {
+        let conn = knowledge.conn();
+        // Claude's first revision two weeks earlier; one row from before authors were recorded.
+        conn.execute(
+            "UPDATE revision SET created_at = '2026-10-14T09:00:00.000Z' WHERE number = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE revision SET created_at = '2026-10-27T09:00:00.000Z' WHERE number = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE note SET created_at = '2026-10-28T09:00:00.000Z' WHERE body = 'from claude'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE note SET created_at = '2026-10-21T09:00:00.000Z', author = NULL \
+             WHERE body = 'from vibe'",
+            [],
+        )
+        .unwrap();
+    }
+    knowledge.add_note("vibe again", &vibe).unwrap();
+    knowledge
+        .conn()
+        .execute(
+            "UPDATE note SET created_at = '2026-10-22T09:00:00.000Z' WHERE body = 'vibe again'",
+            [],
+        )
+        .unwrap();
+
+    let activity: Vec<_> = knowledge
+        .author_activity()
+        .unwrap()
+        .into_iter()
+        .map(|a| (a.author, a.revisions, a.notes, a.first, a.last))
+        .collect();
+    assert_eq!(
+        activity,
+        [
+            (
+                Some(claude.clone()),
+                2,
+                1,
+                "2026-10-14T09:00:00.000Z".to_owned(),
+                "2026-10-28T09:00:00.000Z".to_owned()
+            ),
+            (
+                Some(vibe.clone()),
+                0,
+                1,
+                "2026-10-22T09:00:00.000Z".to_owned(),
+                "2026-10-22T09:00:00.000Z".to_owned()
+            ),
+            (
+                None,
+                0,
+                1,
+                "2026-10-21T09:00:00.000Z".to_owned(),
+                "2026-10-21T09:00:00.000Z".to_owned()
+            ),
+        ]
+    );
+
+    let weekly = knowledge.weekly_activity_until("2026-11-04").unwrap();
+    assert_eq!(
+        weekly.weeks,
+        ["2026-10-12", "2026-10-19", "2026-10-26", "2026-11-02"]
+    );
+    assert_eq!(
+        weekly.authors,
+        [
+            (Some(claude), vec![1, 0, 2, 0]),
+            (Some(vibe), vec![0, 1, 0, 0]),
+            (None, vec![0, 1, 0, 0]),
+        ]
+    );
+}
