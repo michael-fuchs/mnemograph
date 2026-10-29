@@ -186,13 +186,13 @@ async fn open_views_receive_a_patch_when_an_agent_writes() {
 
     ui.call(
         "write_page",
-        json!({ "title": "Rust", "body": "Version **two**.", "base_revision": 1 }),
+        json!({ "title": "Rust", "body": "Version **two**, see [[Cargo]].", "base_revision": 1 }),
     )
     .await;
 
     let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut text = String::new();
-        while !text.contains("Version <strong>two</strong>") {
+        while !(text.contains("Version <strong>two</strong>") && text.contains("</main>")) {
             let chunk = stream.chunk().await.unwrap().expect("stream ended");
             text.push_str(&String::from_utf8_lossy(&chunk));
         }
@@ -208,6 +208,11 @@ async fn open_views_receive_a_patch_when_an_agent_writes() {
         received.contains("data: elements <main id=\"content\">"),
         "{received}"
     );
+    // The new link reaches the graph with the same patch.
+    assert!(
+        received.contains("<mnemo-graph graph=") && received.contains("&#34;Cargo&#34;"),
+        "{received}"
+    );
 }
 
 #[tokio::test]
@@ -217,4 +222,85 @@ async fn unknown_live_views_are_rejected() {
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
+}
+
+/// The data of the page's `mnemo-graph` element, if it has one.
+fn graph_data(html: &str) -> Option<Value> {
+    let start = html.find("<mnemo-graph graph=\"")? + "<mnemo-graph graph=\"".len();
+    let end = start + html[start..].find('"')?;
+    let unescaped = html[start..end]
+        .replace("&#34;", "\"")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    Some(serde_json::from_str(&unescaped).unwrap())
+}
+
+#[tokio::test]
+async fn pages_and_stubs_show_their_neighborhood_graph() {
+    let ui = Ui::start().await;
+    ui.call(
+        "write_page",
+        json!({ "title": "Rust", "body": "", "aliases": ["rustlang"], "page_type": "technology" }),
+    )
+    .await;
+    ui.call(
+        "write_page",
+        json!({ "title": "mnemograph", "body": "[[rustlang]] and [[Tantivy]] <b>&</b>", "page_type": "project" }),
+    )
+    .await;
+    ui.call("write_page", json!({ "title": "Alone", "body": "" }))
+        .await;
+
+    let (status, html) = ui.html("/pages/Rust").await;
+    assert_eq!(status, 200);
+    let graph = graph_data(&html).expect("the page has a graph");
+    let nodes = graph["nodes"].as_array().unwrap();
+    let summary: Vec<_> = nodes
+        .iter()
+        .map(|n| {
+            (
+                n["label"].as_str().unwrap(),
+                n["distance"].as_u64().unwrap(),
+                n["stub"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    // The center first, then nearest first; the link through the alias counts.
+    assert_eq!(
+        summary,
+        [
+            ("Rust", 0, false),
+            ("mnemograph", 1, false),
+            ("Tantivy", 2, true)
+        ]
+    );
+    assert_eq!(nodes[2]["url"], "/pages/Tantivy");
+    assert_eq!(graph["edges"], json!([[0, 1], [1, 2]]));
+    // Page types are colored by their position in the configured list, with a legend.
+    assert_eq!(nodes[0]["color"], 1);
+    assert_eq!(nodes[1]["color"], 0);
+    assert!(nodes[2]["color"].is_null());
+    assert!(
+        html.contains("var(--type-0)\"></span> project</span>"),
+        "{html}"
+    );
+    assert!(html.contains("<script src=\"/assets/graph.js\"></script>"));
+
+    let (status, stub) = ui.html("/pages/Tantivy").await;
+    assert_eq!(status, 200);
+    let graph = graph_data(&stub).expect("a stub has a graph");
+    assert_eq!(graph["nodes"][0]["label"], "Tantivy");
+    assert_eq!(graph["nodes"][0]["stub"], true);
+
+    let (_, alone) = ui.html("/pages/Alone").await;
+    assert!(graph_data(&alone).is_none(), "nothing to draw");
+
+    let script = reqwest::get(format!("{}/assets/cytoscape.min.js", ui.base))
+        .await
+        .unwrap();
+    assert_eq!(script.status(), 200);
+    assert_eq!(script.headers()["content-encoding"], "gzip");
 }

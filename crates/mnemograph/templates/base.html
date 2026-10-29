@@ -26,6 +26,7 @@
   <div data-init="{{ header.live_request() }}"></div>
   <script type="module" src="/assets/datastar.js"></script>
   {% endif %}
+  {% block scripts %}{% endblock %}
   {% if has_mermaid %}
   <script src="/assets/mermaid.min.js"></script>
   <script>

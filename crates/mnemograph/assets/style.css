@@ -1,11 +1,15 @@
 :root {
   --bg: #fdfdfc; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
   --accent: #2f5fb3; --stub: #b0452f; --code-bg: #f3f3ef;
+  --type-0: #4e79a7; --type-1: #59a14f; --type-2: #e1a23b; --type-3: #b07aa1;
+  --type-4: #76b7b2; --type-5: #9c755f; --type-6: #e15759; --type-7: #8c8c8c;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #18181a; --fg: #e6e6e3; --muted: #9a9a95; --line: #333337;
     --accent: #8fb0ef; --stub: #e58c75; --code-bg: #232327;
+    --type-0: #7da7d9; --type-1: #8cc97f; --type-2: #f0c060; --type-3: #d3a4c6;
+    --type-4: #9fd8d2; --type-5: #c49a80; --type-6: #f28b8c; --type-7: #b5b5b5;
   }
 }
 * { box-sizing: border-box; }
@@ -66,3 +70,12 @@ ol.hits { list-style: none; padding: 0; }
 mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: inherit; padding: 0 0.1rem; }
 .notice { padding: 0.5rem 0.8rem; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); }
 .error { color: var(--stub); }
+mnemo-graph { height: 28rem; border: 1px solid var(--line); border-radius: 6px; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+.legend > span { white-space: nowrap; }
+.legend .swatch {
+  display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 50%;
+  border: 1.5px solid var(--muted); vertical-align: -0.05rem;
+}
+.legend .swatch.center { border: 3px solid var(--accent); }
+.legend .swatch.stub { border-style: dashed; border-color: var(--stub); }

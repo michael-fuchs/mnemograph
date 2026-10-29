@@ -13,6 +13,7 @@
 </article>
 
 <aside class="context">
+  {% call m::graph(graph) %}{% endcall %}
   {% if !links.is_empty() %}
   <section><h2>Links</h2>{% call m::link_list(links) %}{% endcall %}</section>
   {% endif %}
@@ -23,4 +24,8 @@
   <section><h2>Notes</h2>{% call m::note_list(notes) %}{% endcall %}</section>
   {% endif %}
 </aside>
+{% endblock %}
+{% block scripts %}
+<script src="/assets/cytoscape.min.js"></script>
+<script src="/assets/graph.js"></script>
 {% endblock %}

@@ -61,6 +61,7 @@ With authentication on, `http://localhost:8080/` asks the owner to log in at the
 
 - the page list with recent notes;
 - pages with rendered Markdown (tables, task lists, footnotes, alerts, Mermaid diagrams), links, backlinks and notes, and stubs with what links to them;
+- a graph of each page's and stub's neighborhood: everything within 1, 2 or 3 links (like `related`), with stubs and page types marked; clicking a node opens it;
 - search over pages and notes, optionally limited to a page type;
 - each page's history with author and time of every revision, and any revision rendered as it was.
 
