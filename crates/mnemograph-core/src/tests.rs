@@ -1765,3 +1765,115 @@ fn activity_per_author_counts_revisions_and_notes() {
         ]
     );
 }
+
+// Access log
+
+#[test]
+fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
+    let knowledge = knowledge();
+    let claude = Author::Agent("claude-code".into());
+    let vibe = Author::Agent("vibe".into());
+    knowledge
+        .write_page(
+            "Rust",
+            "",
+            None,
+            PageChanges {
+                aliases: Some(vec!["rustlang".into()]),
+                ..Default::default()
+            },
+            &claude,
+        )
+        .unwrap();
+    create(&knowledge, "Gone", "");
+    let read = Access::ReadPage;
+    knowledge.record_access(&claude, read, "Rust", 1).unwrap();
+    knowledge
+        .record_access(&claude, read, "rustlang", 1)
+        .unwrap();
+    knowledge.record_access(&vibe, read, "RUST", 1).unwrap();
+    knowledge.record_access(&vibe, read, "Gone", 1).unwrap();
+    knowledge.record_access(&vibe, read, "Missing", 0).unwrap();
+    knowledge
+        .record_access(&claude, Access::Search, "Datenbank", 3)
+        .unwrap();
+    knowledge
+        .record_access(&claude, Access::Search, "Garage  backup", 0)
+        .unwrap();
+    knowledge
+        .record_access(&vibe, Access::Search, "garage backup", 0)
+        .unwrap();
+    knowledge
+        .record_access(&vibe, Access::Search, "Hetzner", 0)
+        .unwrap();
+    knowledge
+        .record_access(&claude, Access::Related, "Rust", 2)
+        .unwrap();
+    knowledge.delete_page("Gone").unwrap();
+
+    let agents: Vec<_> = knowledge
+        .agent_access()
+        .unwrap()
+        .into_iter()
+        .map(|a| (a.author.unwrap(), a.reads, a.searches, a.related))
+        .collect();
+    // Both did five things; claude's last came later.
+    assert_eq!(agents, [(claude.clone(), 2, 2, 1), (vibe.clone(), 3, 2, 0)]);
+
+    // Reads under an alias or another spelling count for the page; deleted pages and failed
+    // reads are left out.
+    let most_read = knowledge.most_read_pages(10).unwrap();
+    assert_eq!(
+        most_read,
+        [PageReads {
+            title: "Rust".into(),
+            reads: 3
+        }]
+    );
+
+    let gaps: Vec<_> = knowledge
+        .knowledge_gaps(10)
+        .unwrap()
+        .into_iter()
+        .map(|g| (g.terms, g.times, g.author.unwrap()))
+        .collect();
+    assert_eq!(
+        gaps,
+        [
+            ("Hetzner".to_owned(), 1, vibe.clone()),
+            ("garage backup".to_owned(), 2, vibe.clone()),
+        ]
+    );
+
+    let weekly = knowledge.weekly_access().unwrap();
+    assert_eq!(weekly.weeks.len(), 1);
+    assert_eq!(
+        weekly.authors,
+        [(Some(claude), vec![5]), (Some(vibe), vec![5])]
+    );
+}
+
+#[test]
+fn old_access_log_entries_are_pruned() {
+    let knowledge = knowledge();
+    let agent = author();
+    knowledge
+        .record_access(&agent, Access::Search, "old", 0)
+        .unwrap();
+    knowledge
+        .record_access(&agent, Access::Search, "new", 0)
+        .unwrap();
+    knowledge
+        .conn()
+        .execute(
+            "UPDATE access SET at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-91 days') \
+             WHERE target = 'old'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(knowledge.prune_access_log(90).unwrap(), 1);
+    assert_eq!(knowledge.prune_access_log(90).unwrap(), 0);
+    let gaps = knowledge.knowledge_gaps(10).unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].terms, "new");
+}

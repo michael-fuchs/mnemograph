@@ -7,7 +7,7 @@ mod live;
 pub mod login;
 pub mod render;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use askama::Template;
@@ -44,6 +44,8 @@ pub struct WebState {
     pending_logins: PendingLogins,
     /// The most pages and stubs the whole-wiki graph shows.
     graph_max_nodes: usize,
+    /// How many days the access log keeps entries, for the statistics.
+    access_log_days: u32,
     /// Changes whenever agents write.
     changes: watch::Receiver<u64>,
     /// Ends the live update streams when the server shuts down.
@@ -55,6 +57,7 @@ pub fn router(
     knowledge: Arc<Knowledge>,
     login: Option<LoginSettings>,
     graph_max_nodes: usize,
+    access_log_days: u32,
     changes: watch::Receiver<u64>,
     shutdown: CancellationToken,
 ) -> Router {
@@ -63,6 +66,7 @@ pub fn router(
         login,
         pending_logins: PendingLogins::default(),
         graph_max_nodes,
+        access_log_days,
         changes,
         shutdown,
     });
@@ -364,6 +368,24 @@ struct LinkedPage {
     links: u32,
 }
 
+/// How many recent searches without hits the dashboard lists.
+const KNOWLEDGE_GAPS: usize = 20;
+
+struct AccessRow {
+    agent: String,
+    reads: u32,
+    searches: u32,
+    related: u32,
+    last: String,
+}
+
+struct GapRow {
+    terms: String,
+    times: u32,
+    agent: String,
+    last: String,
+}
+
 struct AuthorRow {
     author: String,
     revisions: u32,
@@ -380,6 +402,11 @@ struct StatsTemplate {
     growth_html: Option<String>,
     activity_html: Option<String>,
     authors: Vec<AuthorRow>,
+    access_days: u32,
+    access_html: Option<String>,
+    agents: Vec<AccessRow>,
+    most_read: Vec<LinkedPage>,
+    gaps: Vec<GapRow>,
     most_linked: Vec<LinkedPage>,
     orphans: Vec<LinkItem>,
     has_mermaid: bool,
@@ -563,12 +590,19 @@ async fn stats(
             knowledge.orphaned_pages()?,
             knowledge.author_activity()?,
             knowledge.weekly_activity()?,
+            (
+                knowledge.agent_access()?,
+                knowledge.weekly_access()?,
+                knowledge.most_read_pages(MOST_LINKED)?,
+                knowledge.knowledge_gaps(KNOWLEDGE_GAPS)?,
+            ),
         ))
     })
     .await;
-    let Ok(Ok((totals, weeks, most_linked, orphans, authors, activity))) = loaded else {
+    let Ok(Ok((totals, weeks, most_linked, orphans, authors, activity, access))) = loaded else {
         return internal_error(&state, &session);
     };
+    let (agents, weekly_access, most_read, gaps) = access;
     let growth_html = (!weeks.is_empty()).then(|| {
         let labels: Vec<String> = weeks.iter().map(|w| w.start.clone()).collect();
         chart::line_chart(
@@ -588,24 +622,19 @@ async fn stats(
             ],
         )
     });
-    // One line per author, most active first, colored like page types.
-    let activity_html = (!activity.weeks.is_empty()).then(|| {
-        let series: Vec<_> = activity
-            .authors
-            .iter()
-            .enumerate()
-            .map(|(i, (author, counts))| chart::Series {
-                label: author_label(author.as_ref()),
-                color: format!("var(--type-{})", i % TYPE_COLORS),
-                values: counts.clone(),
-            })
-            .collect();
-        chart::line_chart(
-            "Revisions and notes per week by author",
-            &activity.weeks,
-            &series,
-        )
-    });
+    // Each author keeps one color in both charts: writers first, then agents that only read.
+    let mut colors = HashMap::new();
+    for (author, _) in activity.authors.iter().chain(&weekly_access.authors) {
+        let next = colors.len() % TYPE_COLORS;
+        colors.entry(author_label(author.as_ref())).or_insert(next);
+    }
+    let activity_html =
+        per_author_chart(&activity, &colors, "Revisions and notes per week by author");
+    let access_html = per_author_chart(
+        &weekly_access,
+        &colors,
+        "Reads, searches and explorations per week by agent",
+    );
     StatsTemplate {
         header: Header::new(&state, &session).live("/stats".to_owned()),
         totals,
@@ -637,9 +666,63 @@ async fn stats(
                 stub: false,
             })
             .collect(),
+        access_days: state.access_log_days,
+        access_html,
+        agents: agents
+            .into_iter()
+            .map(|a| AccessRow {
+                agent: author_label(a.author.as_ref()),
+                reads: a.reads,
+                searches: a.searches,
+                related: a.related,
+                last: a.last.get(..10).unwrap_or(&a.last).to_owned(),
+            })
+            .collect(),
+        most_read: most_read
+            .into_iter()
+            .map(|page| LinkedPage {
+                url: page_url(&page.title),
+                title: page.title,
+                links: page.reads,
+            })
+            .collect(),
+        gaps: gaps
+            .into_iter()
+            .map(|gap| GapRow {
+                terms: gap.terms,
+                times: gap.times,
+                agent: author_label(gap.author.as_ref()),
+                last: gap.last.get(..10).unwrap_or(&gap.last).to_owned(),
+            })
+            .collect(),
         has_mermaid: false,
     }
     .into_response()
+}
+
+/// A chart with one line per author, most active first, in the page type colors chosen in
+/// `colors` (by author label); `None` if there is nothing to show.
+fn per_author_chart(
+    activity: &mnemograph_core::WeeklyActivity,
+    colors: &HashMap<String, usize>,
+    title: &str,
+) -> Option<String> {
+    if activity.weeks.is_empty() {
+        return None;
+    }
+    let series: Vec<_> = activity
+        .authors
+        .iter()
+        .map(|(author, counts)| {
+            let label = author_label(author.as_ref());
+            chart::Series {
+                color: format!("var(--type-{})", colors.get(&label).copied().unwrap_or(0)),
+                label,
+                values: counts.clone(),
+            }
+        })
+        .collect();
+    Some(chart::line_chart(title, &activity.weeks, &series))
 }
 
 /// The whole wiki as a graph, optionally only pages of some types (`?type=a&type=b`).

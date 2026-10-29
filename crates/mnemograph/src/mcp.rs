@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use mnemograph_core::{
-    Author, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related,
-    SearchHit,
+    Access, Author, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges,
+    Related, SearchHit,
 };
 use rmcp::{
     ServerHandler,
@@ -338,14 +338,24 @@ impl McpServer {
     async fn read_page(
         &self,
         Parameters(args): Parameters<ReadPageArgs>,
+        Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
         let title = args.title;
+        let reader = reader(&request);
         let (page, links, notes) = blocking({
             let title = title.clone();
             move || {
+                let page = knowledge.page(&title)?;
+                log_access(
+                    &knowledge,
+                    reader,
+                    Access::ReadPage,
+                    &title,
+                    page.is_some().into(),
+                );
                 Ok((
-                    knowledge.page(&title)?,
+                    page,
                     knowledge.links(&title)?,
                     knowledge.notes_about(&title, RECENT_NOTES)?,
                 ))
@@ -367,20 +377,26 @@ impl McpServer {
     async fn search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
+        Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<SearchView>, String> {
         let knowledge = self.knowledge.clone();
+        let reader = reader(&request);
         let limit = args
             .limit
             .unwrap_or(SEARCH_LIMIT.0)
             .clamp(1, SEARCH_LIMIT.1) as usize;
         let page_type = args.page_type.filter(|t| !t.trim().is_empty());
-        blocking(move || knowledge.search(&args.query, page_type.as_deref(), limit))
-            .await
-            .map(|hits| {
-                rmcp::Json(SearchView {
-                    hits: hits.into_iter().map(HitView::from).collect(),
-                })
+        blocking(move || {
+            let hits = knowledge.search(&args.query, page_type.as_deref(), limit)?;
+            log_access(&knowledge, reader, Access::Search, &args.query, hits.len());
+            Ok(hits)
+        })
+        .await
+        .map(|hits| {
+            rmcp::Json(SearchView {
+                hits: hits.into_iter().map(HitView::from).collect(),
             })
+        })
     }
 
     #[tool(
@@ -389,16 +405,23 @@ impl McpServer {
     async fn related(
         &self,
         Parameters(args): Parameters<RelatedArgs>,
+        Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<RelatedView>, String> {
         let knowledge = self.knowledge.clone();
+        let reader = reader(&request);
         let hops = args.hops.unwrap_or(2).clamp(1, MAX_HOPS.into()) as u32;
-        blocking(move || knowledge.related(&args.title, hops, RELATED_LIMIT))
-            .await
-            .map(|related| {
-                rmcp::Json(RelatedView {
-                    related: related.into_iter().map(RelatedEntry::from).collect(),
-                })
+        blocking(move || {
+            let related = knowledge.related(&args.title, hops, RELATED_LIMIT);
+            let hits = related.as_ref().map(Vec::len).unwrap_or(0);
+            log_access(&knowledge, reader, Access::Related, &args.title, hits);
+            related
+        })
+        .await
+        .map(|related| {
+            rmcp::Json(RelatedView {
+                related: related.into_iter().map(RelatedEntry::from).collect(),
             })
+        })
     }
 
     #[tool(
@@ -455,6 +478,30 @@ impl ServerHandler for McpServer {
                 self.usage_hint(),
                 self.knowledge.page_types().join(", ")
             ))
+    }
+}
+
+/// Who reads, for the access log: the authenticated identity, if any.
+fn reader(request: &http::request::Parts) -> Option<Author> {
+    request
+        .extensions
+        .get::<Identity>()
+        .map(|identity| identity.author.clone())
+}
+
+/// Records a read, search or exploration in the access log. A failure is only logged: it must
+/// never fail the agent's call.
+fn log_access(
+    knowledge: &Knowledge,
+    reader: Option<Author>,
+    access: Access,
+    target: &str,
+    hits: usize,
+) {
+    let Some(reader) = reader else { return };
+    let hits = u32::try_from(hits).unwrap_or(u32::MAX);
+    if let Err(error) = knowledge.record_access(&reader, access, target, hits) {
+        tracing::warn!(%error, "could not record an access");
     }
 }
 

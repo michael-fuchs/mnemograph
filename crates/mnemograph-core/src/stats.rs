@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use rusqlite::Connection;
+
 use crate::{Author, GraphNode, Knowledge, RESOLVED_KEYS, Result};
 
 /// How much knowledge there is now.
@@ -47,7 +49,7 @@ pub struct WeeklyActivity {
 }
 
 /// Revisions and notes with their author and time, for a `WITH` clause.
-const WRITES: &str = "write (author, created_at, revision, note) AS ( \
+const WRITES: &str = "event (author, created_at, revision, note) AS ( \
        SELECT author, created_at, 1, 0 FROM revision \
        UNION ALL SELECT author, created_at, 0, 1 FROM note)";
 
@@ -58,7 +60,7 @@ impl Knowledge {
         let mut query = conn.prepare(&format!(
             "WITH {WRITES} \
              SELECT author, sum(revision), sum(note), min(created_at), max(created_at) \
-             FROM write GROUP BY author \
+             FROM event GROUP BY author \
              ORDER BY count(*) DESC, max(created_at) DESC"
         ))?;
         let activity = query
@@ -84,58 +86,7 @@ impl Knowledge {
 
     /// [`Knowledge::weekly_activity`] up to the week of `until` (an SQLite date such as `now`).
     pub(crate) fn weekly_activity_until(&self, until: &str) -> Result<WeeklyActivity> {
-        let order: Vec<Option<String>> = self
-            .author_activity()?
-            .into_iter()
-            .map(|a| a.author.map(|author| author.to_string()))
-            .collect();
-        let conn = self.conn();
-        let mut weeks_query = conn.prepare(&format!(
-            "WITH RECURSIVE {WRITES}, \
-               bound (first, last) AS ( \
-                 SELECT min(date(created_at, 'weekday 0', '-6 days')), \
-                        max(max(date(created_at, 'weekday 0', '-6 days')), \
-                            date(?1, 'weekday 0', '-6 days')) FROM write), \
-               weeks (week) AS ( \
-                 SELECT first FROM bound \
-                 UNION ALL SELECT date(week, '+7 days') FROM weeks, bound WHERE week < bound.last) \
-             SELECT week FROM weeks WHERE week IS NOT NULL"
-        ))?;
-        let weeks: Vec<String> = weeks_query
-            .query_map([until], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        if weeks.is_empty() {
-            return Ok(WeeklyActivity::default());
-        }
-        let position: HashMap<&str, usize> = weeks
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.as_str(), i))
-            .collect();
-        let row_of: HashMap<&Option<String>, usize> =
-            order.iter().enumerate().map(|(i, a)| (a, i)).collect();
-        let mut counts = vec![vec![0u32; weeks.len()]; order.len()];
-        let mut query = conn.prepare(&format!(
-            "WITH {WRITES} \
-             SELECT author, date(created_at, 'weekday 0', '-6 days'), count(*) FROM write \
-             GROUP BY 1, 2"
-        ))?;
-        let mut rows = query.query([])?;
-        while let Some(row) = rows.next()? {
-            let author: Option<String> = row.get(0)?;
-            let week: String = row.get(1)?;
-            if let (Some(&a), Some(&w)) = (row_of.get(&author), position.get(week.as_str())) {
-                counts[a][w] = row.get(2)?;
-            }
-        }
-        Ok(WeeklyActivity {
-            authors: order
-                .iter()
-                .map(|author| author.as_deref().and_then(Author::parse))
-                .zip(counts)
-                .collect(),
-            weeks,
-        })
+        weekly_per_author(&self.conn(), WRITES, until)
     }
 
     /// Counts pages, stubs, links, notes and revisions.
@@ -223,4 +174,67 @@ impl Knowledge {
         orphans.sort_by_cached_key(|node| node.title.to_lowercase());
         Ok(orphans)
     }
+}
+
+/// Counts events per week and author. `events` defines `event (author, created_at, …)` for a
+/// `WITH` clause. Weeks run from the first event's to the week of `until` (an SQLite date such
+/// as `now`); authors come most events first, then by latest event.
+pub(crate) fn weekly_per_author(
+    conn: &Connection,
+    events: &str,
+    until: &str,
+) -> Result<WeeklyActivity> {
+    let mut weeks_query = conn.prepare(&format!(
+        "WITH RECURSIVE {events}, \
+           bound (first, last) AS ( \
+             SELECT min(date(created_at, 'weekday 0', '-6 days')), \
+                    max(max(date(created_at, 'weekday 0', '-6 days')), \
+                        date(?1, 'weekday 0', '-6 days')) FROM event), \
+           weeks (week) AS ( \
+             SELECT first FROM bound \
+             UNION ALL SELECT date(week, '+7 days') FROM weeks, bound WHERE week < bound.last) \
+         SELECT week FROM weeks WHERE week IS NOT NULL"
+    ))?;
+    let weeks: Vec<String> = weeks_query
+        .query_map([until], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if weeks.is_empty() {
+        return Ok(WeeklyActivity::default());
+    }
+    let order: Vec<Option<String>> = conn
+        .prepare(&format!(
+            "WITH {events} SELECT author FROM event GROUP BY author \
+             ORDER BY count(*) DESC, max(created_at) DESC"
+        ))?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let position: HashMap<&str, usize> = weeks
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.as_str(), i))
+        .collect();
+    let row_of: HashMap<&Option<String>, usize> =
+        order.iter().enumerate().map(|(i, a)| (a, i)).collect();
+    let mut counts = vec![vec![0u32; weeks.len()]; order.len()];
+    let mut query = conn.prepare(&format!(
+        "WITH {events} \
+         SELECT author, date(created_at, 'weekday 0', '-6 days'), count(*) FROM event \
+         GROUP BY 1, 2"
+    ))?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        let author: Option<String> = row.get(0)?;
+        let week: String = row.get(1)?;
+        if let (Some(&a), Some(&w)) = (row_of.get(&author), position.get(week.as_str())) {
+            counts[a][w] = row.get(2)?;
+        }
+    }
+    Ok(WeeklyActivity {
+        authors: order
+            .iter()
+            .map(|author| author.as_deref().and_then(Author::parse))
+            .zip(counts)
+            .collect(),
+        weeks,
+    })
 }

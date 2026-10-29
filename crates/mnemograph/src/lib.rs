@@ -20,6 +20,11 @@ pub use mcp::{
     HitView, LinkView, McpServer, NoteView, PageView, RelatedEntry, RelatedView, SearchView,
 };
 
+/// How many days the access log keeps entries unless configured otherwise.
+pub const DEFAULT_ACCESS_LOG_DAYS: u32 = 90;
+/// How often old access log entries are deleted.
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// How the HTTP application is set up.
 pub struct AppConfig {
     /// Validates agents' access tokens. `None` disables authentication: every request is
@@ -35,6 +40,8 @@ pub struct AppConfig {
     pub web_login: Option<web::login::LoginSettings>,
     /// The most pages and stubs the whole-wiki graph shows; the most-linked are kept.
     pub graph_max_nodes: usize,
+    /// How many days the access log keeps what agents read and searched.
+    pub access_log_days: u32,
     /// Cancelling it stops open MCP streams.
     pub shutdown: CancellationToken,
 }
@@ -47,11 +54,17 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         .with_json_response(true)
         .with_allowed_hosts(config.allowed_hosts)
         .with_cancellation_token(config.shutdown.clone());
+    tokio::spawn(prune_access_log(
+        knowledge.clone(),
+        config.access_log_days,
+        config.shutdown.clone(),
+    ));
     let changes = Arc::new(tokio::sync::watch::Sender::new(0u64));
     let web = web::router(
         knowledge.clone(),
         config.web_login,
         config.graph_max_nodes,
+        config.access_log_days,
         changes.subscribe(),
         config.shutdown.clone(),
     );
@@ -113,4 +126,23 @@ async fn log_request(
     let response = next.run(request).await;
     tracing::debug!(%method, %path, status = response.status().as_u16(), "request");
     response
+}
+
+/// Deletes access log entries older than `days` days now and then every [`PRUNE_INTERVAL`],
+/// until shutdown.
+async fn prune_access_log(knowledge: Arc<Knowledge>, days: u32, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let knowledge = knowledge.clone();
+        match tokio::task::spawn_blocking(move || knowledge.prune_access_log(days)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(deleted)) => tracing::info!(deleted, days, "pruned the access log"),
+            Ok(Err(error)) => tracing::warn!(%error, "pruning the access log failed"),
+            Err(error) => tracing::warn!(%error, "pruning the access log failed"),
+        }
+    }
 }

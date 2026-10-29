@@ -101,6 +101,7 @@ impl TestServer {
                 limits: Default::default(),
                 web_login: None,
                 graph_max_nodes: mnemograph::web::DEFAULT_GRAPH_NODES,
+                access_log_days: mnemograph::DEFAULT_ACCESS_LOG_DAYS,
                 shutdown: shutdown.child_token(),
             },
         );

@@ -119,6 +119,9 @@ struct ServeArgs {
     /// The most pages and stubs the whole-wiki graph shows; the most-linked are kept.
     #[arg(long, env = "MNEMOGRAPH_GRAPH_MAX_NODES", default_value_t = mnemograph::web::DEFAULT_GRAPH_NODES)]
     graph_max_nodes: usize,
+    /// Days the access log keeps what agents read and searched (shown in the statistics).
+    #[arg(long, env = "MNEMOGRAPH_ACCESS_LOG_DAYS", default_value_t = mnemograph::DEFAULT_ACCESS_LOG_DAYS, value_parser = clap::value_parser!(u32).range(1..))]
+    access_log_days: u32,
 }
 
 #[derive(Subcommand)]
@@ -234,6 +237,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_note_bytes,
         writes_per_minute,
         graph_max_nodes,
+        access_log_days,
         web_client_id,
         web_client_secret,
         owner_group,
@@ -303,6 +307,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             allowed_hosts,
             web_login,
             graph_max_nodes,
+            access_log_days,
             limits: WriteLimits {
                 max_page_bytes,
                 max_note_bytes,
