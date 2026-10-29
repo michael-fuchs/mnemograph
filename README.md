@@ -65,7 +65,7 @@ With authentication on, `http://localhost:8080/` asks the owner to log in at the
 - a graph of each page's and stub's neighborhood: everything within 1, 2 or 3 links (like `related`), with stubs and page types marked; clicking a node opens it;
 - a graph of the whole wiki ("Graph" in the header): every page, including unlinked ones, and every stub, filterable by page type. Above `--graph-max-nodes` only the most-linked are shown, and the page says how many are hidden. In both graphs, the most important nodes get labels first; zooming in or pointing at a node shows the rest;
 - search over pages and notes, optionally limited to a page type;
-- statistics ("Statistics" in the header): totals of pages, stubs, links, notes and revisions, a chart of pages and notes per week, the most-linked pages and orphaned pages;
+- statistics ("Statistics" in the header): totals of pages, stubs, links, notes and revisions, a chart of pages and notes per week, activity per author (revisions and notes per week, with totals and first and latest day), the most-linked pages and orphaned pages;
 - each page's history with author and time of every revision, and any revision rendered as it was.
 
 The page list, pages, histories, graphs and statistics update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.

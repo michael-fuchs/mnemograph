@@ -27,7 +27,7 @@ pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{GraphNode, MAX_HOPS, Neighborhood, Related, WikiGraph};
 pub use sessions::Session;
-pub use stats::{Totals, Week};
+pub use stats::{AuthorActivity, Totals, Week, WeeklyActivity};
 
 use search::{IndexedText, Item, SearchIndex};
 use title::clean_title;

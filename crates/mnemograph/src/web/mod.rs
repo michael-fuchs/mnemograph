@@ -364,12 +364,22 @@ struct LinkedPage {
     links: u32,
 }
 
+struct AuthorRow {
+    author: String,
+    revisions: u32,
+    notes: u32,
+    first: String,
+    last: String,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "stats.html")]
 struct StatsTemplate {
     header: Header,
     totals: mnemograph_core::Totals,
     growth_html: Option<String>,
+    activity_html: Option<String>,
+    authors: Vec<AuthorRow>,
     most_linked: Vec<LinkedPage>,
     orphans: Vec<LinkItem>,
     has_mermaid: bool,
@@ -551,10 +561,12 @@ async fn stats(
             knowledge.weekly_growth()?,
             knowledge.most_linked_pages(MOST_LINKED)?,
             knowledge.orphaned_pages()?,
+            knowledge.author_activity()?,
+            knowledge.weekly_activity()?,
         ))
     })
     .await;
-    let Ok(Ok((totals, weeks, most_linked, orphans))) = loaded else {
+    let Ok(Ok((totals, weeks, most_linked, orphans, authors, activity))) = loaded else {
         return internal_error(&state, &session);
     };
     let growth_html = (!weeks.is_empty()).then(|| {
@@ -576,10 +588,39 @@ async fn stats(
             ],
         )
     });
+    // One line per author, most active first, colored like page types.
+    let activity_html = (!activity.weeks.is_empty()).then(|| {
+        let series: Vec<_> = activity
+            .authors
+            .iter()
+            .enumerate()
+            .map(|(i, (author, counts))| chart::Series {
+                label: author_label(author.as_ref()),
+                color: format!("var(--type-{})", i % TYPE_COLORS),
+                values: counts.clone(),
+            })
+            .collect();
+        chart::line_chart(
+            "Revisions and notes per week by author",
+            &activity.weeks,
+            &series,
+        )
+    });
     StatsTemplate {
         header: Header::new(&state, &session).live("/stats".to_owned()),
         totals,
         growth_html,
+        activity_html,
+        authors: authors
+            .into_iter()
+            .map(|a| AuthorRow {
+                author: author_label(a.author.as_ref()),
+                revisions: a.revisions,
+                notes: a.notes,
+                first: a.first.get(..10).unwrap_or(&a.first).to_owned(),
+                last: a.last.get(..10).unwrap_or(&a.last).to_owned(),
+            })
+            .collect(),
         most_linked: most_linked
             .into_iter()
             .map(|node| LinkedPage {
