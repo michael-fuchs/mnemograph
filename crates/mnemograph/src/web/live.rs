@@ -30,6 +30,7 @@ enum View {
     History(String),
     /// The whole-wiki graph, with its query string (the chosen page types).
     Graph(String),
+    Stats,
 }
 
 impl View {
@@ -37,6 +38,9 @@ impl View {
     fn parse(path: &str) -> Option<Self> {
         if path == "/" {
             return Some(View::Index);
+        }
+        if path == "/stats" {
+            return Some(View::Stats);
         }
         if path == "/graph" {
             return Some(View::Graph(String::new()));
@@ -107,6 +111,7 @@ async fn render_events(state: &Arc<WebState>, session: &Session, view: &View) ->
         View::Page(title) => super::page(state, session, Path(title.clone())).await,
         View::History(title) => super::history(state, session, Path(title.clone())).await,
         View::Graph(query) => super::graph(state, session, RawQuery(Some(query.clone()))).await,
+        View::Stats => super::stats(state, session).await,
     };
     if response.status() != StatusCode::OK {
         // The page was renamed or deleted; a reload shows where it went.
@@ -151,6 +156,7 @@ mod tests {
         assert_eq!(View::parse("/pages/Rust/revisions/1"), None);
         assert_eq!(View::parse("/search"), None);
         assert_eq!(View::parse("/graph"), Some(View::Graph(String::new())));
+        assert_eq!(View::parse("/stats"), Some(View::Stats));
         assert_eq!(
             View::parse("/graph?type=tool&type=project"),
             Some(View::Graph("type=tool&type=project".into()))
