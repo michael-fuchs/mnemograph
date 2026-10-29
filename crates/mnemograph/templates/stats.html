@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Statistics – mnemograph{% endblock %}
+{% block content %}
+<h1>Statistics</h1>
+<dl class="totals">
+  <div><dt>pages</dt><dd>{{ totals.pages }}</dd></div>
+  <div><dt>stubs</dt><dd>{{ totals.stubs }}</dd></div>
+  <div><dt>links</dt><dd>{{ totals.links }}</dd></div>
+  <div><dt>notes</dt><dd>{{ totals.notes }}</dd></div>
+  <div><dt>revisions</dt><dd>{{ totals.revisions }}</dd></div>
+</dl>
+
+<section>
+  <h2>Growth</h2>
+  {% if let Some(html) = growth_html %}
+  {{ html|safe }}
+  <p class="meta">Pages and notes at the end of each week, by the week they were first written. Deleted ones are not counted.</p>
+  {% else %}
+  <p class="empty">Nothing written yet.</p>
+  {% endif %}
+</section>
+
+<div class="columns">
+  <section>
+    <h2>Most-linked pages</h2>
+    {% if most_linked.is_empty() %}
+    <p class="empty">No links yet.</p>
+    {% else %}
+    <ol class="ranked">
+      {% for page in most_linked %}
+      <li><a href="{{ page.url }}">{{ page.title }}</a> <span class="meta">{{ page.links }}</span></li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </section>
+  <section>
+    <h2>Orphaned pages</h2>
+    {% if orphans.is_empty() %}
+    <p class="empty">Every page is linked.</p>
+    {% else %}
+    <p class="meta">No links to or from other pages.</p>
+    <ul class="links">
+      {% for page in orphans %}
+      <li><a href="{{ page.url }}">{{ page.title }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

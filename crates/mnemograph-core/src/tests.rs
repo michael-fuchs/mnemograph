@@ -1536,3 +1536,125 @@ fn revisions_list_the_history_newest_first_with_authors() {
     assert_eq!(history[0].page_type.as_deref(), Some("decision"));
     assert_eq!(knowledge.revisions("Nothing").unwrap(), None);
 }
+
+// Statistics
+
+/// Moves a page's (by title) or note's (by ID) creation to another time.
+fn created_at(knowledge: &Knowledge, table: &str, key: &str, at: &str) {
+    let column = if table == "page" { "title" } else { "id" };
+    knowledge
+        .conn()
+        .execute(
+            &format!("UPDATE {table} SET created_at = ?1 WHERE {column} = ?2"),
+            (at, key),
+        )
+        .unwrap();
+}
+
+#[test]
+fn totals_count_pages_stubs_links_notes_and_revisions() {
+    let knowledge = knowledge();
+    assert_eq!(knowledge.totals().unwrap(), Totals::default());
+
+    create(&knowledge, "Rust", "[[Rust]] [[Cargo]]");
+    let mnemograph = create(&knowledge, "mnemograph", "[[Rust]]");
+    update(
+        &knowledge,
+        "mnemograph",
+        "[[Rust]] [[Tantivy]]",
+        mnemograph.revision,
+    )
+    .unwrap();
+    knowledge
+        .add_note("[[Rust]] and [[Caddy]]", &author())
+        .unwrap();
+
+    assert_eq!(
+        knowledge.totals().unwrap(),
+        Totals {
+            pages: 2,
+            // Cargo and Tantivy from pages, Caddy from the note.
+            stubs: 3,
+            // Rust's link to itself does not count; the note's two do.
+            links: 5,
+            notes: 1,
+            revisions: 3,
+        }
+    );
+}
+
+#[test]
+fn weekly_growth_counts_pages_and_notes_up_to_each_week() {
+    let knowledge = knowledge();
+    assert!(
+        knowledge
+            .weekly_growth_until("2026-10-29")
+            .unwrap()
+            .is_empty()
+    );
+
+    create(&knowledge, "A", "");
+    create(&knowledge, "B", "");
+    let note = knowledge.add_note("first", &author()).unwrap();
+    // Thursday 2026-10-08 and Sunday 2026-10-11 are in the week of Monday 2026-10-05; Monday
+    // 2026-10-19 starts its own week. The week of 10-12 has nothing new.
+    created_at(&knowledge, "page", "A", "2026-10-08T10:00:00.000Z");
+    created_at(
+        &knowledge,
+        "note",
+        &note.id.to_string(),
+        "2026-10-11T23:59:00.000Z",
+    );
+    created_at(&knowledge, "page", "B", "2026-10-19T00:00:00.000Z");
+
+    let weeks = knowledge.weekly_growth_until("2026-10-29").unwrap();
+    let summary: Vec<_> = weeks
+        .iter()
+        .map(|w| (w.start.as_str(), w.pages, w.notes))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("2026-10-05", 1, 1),
+            ("2026-10-12", 1, 1),
+            ("2026-10-19", 2, 1),
+            ("2026-10-26", 2, 1),
+        ]
+    );
+}
+
+#[test]
+fn a_wiki_only_days_old_has_one_week() {
+    let knowledge = knowledge();
+    create(&knowledge, "A", "");
+    let weeks = knowledge.weekly_growth().unwrap();
+    assert_eq!(weeks.len(), 1);
+    assert_eq!((weeks[0].pages, weeks[0].notes), (1, 0));
+}
+
+#[test]
+fn most_linked_and_orphaned_pages() {
+    let knowledge = knowledge();
+    create(&knowledge, "Hub", "[[A]] [[B]] [[Stub]]");
+    create(&knowledge, "A", "[[B]]");
+    create(&knowledge, "B", "");
+    create(&knowledge, "zeta", "");
+    create(&knowledge, "Alone", "[[Alone]]");
+    knowledge.add_note("[[zeta]]", &author()).unwrap();
+
+    let most: Vec<_> = knowledge
+        .most_linked_pages(2)
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.title, n.degree))
+        .collect();
+    assert_eq!(most, [("Hub".to_owned(), 3), ("A".to_owned(), 2)]);
+    // A link to itself and a note's link do not connect a page.
+    let orphans: Vec<_> = knowledge
+        .orphaned_pages()
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert_eq!(orphans, ["Alone", "zeta"]);
+}

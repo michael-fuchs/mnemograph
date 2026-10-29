@@ -13,6 +13,7 @@ mod related;
 mod schema;
 mod search;
 mod sessions;
+mod stats;
 mod title;
 
 use std::path::Path;
@@ -26,6 +27,7 @@ pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{GraphNode, MAX_HOPS, Neighborhood, Related, WikiGraph};
 pub use sessions::Session;
+pub use stats::{Totals, Week};
 
 use search::{IndexedText, Item, SearchIndex};
 use title::clean_title;

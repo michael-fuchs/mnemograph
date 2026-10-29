@@ -1,7 +1,8 @@
 //! The owner's read-only web UI: browse pages, stubs and notes with their neighborhood graphs,
-//! the whole wiki as a graph, search, and page histories.
+//! the whole wiki as a graph, search, page histories, and statistics.
 //! Open views update themselves when agents write (Datastar over server-sent events).
 
+mod chart;
 mod live;
 pub mod login;
 pub mod render;
@@ -69,6 +70,7 @@ pub fn router(
         .route("/", get(index))
         .route("/search", get(search))
         .route("/graph", get(graph))
+        .route("/stats", get(stats))
         .route("/pages/{title}", get(page))
         .route("/pages/{title}/history", get(history))
         .route("/pages/{title}/revisions/{number}", get(revision))
@@ -353,6 +355,26 @@ struct RevisionTemplate {
     has_mermaid: bool,
 }
 
+/// How many most-linked pages the dashboard lists.
+const MOST_LINKED: usize = 10;
+
+struct LinkedPage {
+    title: String,
+    url: String,
+    links: u32,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "stats.html")]
+struct StatsTemplate {
+    header: Header,
+    totals: mnemograph_core::Totals,
+    growth_html: Option<String>,
+    most_linked: Vec<LinkedPage>,
+    orphans: Vec<LinkItem>,
+    has_mermaid: bool,
+}
+
 struct TypeChoice {
     page_type: String,
     color: usize,
@@ -513,6 +535,68 @@ async fn page(
         created_at: timestamp(&page.created_at),
         updated_at: timestamp(&page.updated_at),
         updated_by: author_label(page.author.as_ref()),
+    }
+    .into_response()
+}
+
+/// The statistics dashboard.
+async fn stats(
+    State(state): State<Arc<WebState>>,
+    Extension(session): Extension<Session>,
+) -> Response {
+    let knowledge = state.knowledge.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        Ok::<_, mnemograph_core::Error>((
+            knowledge.totals()?,
+            knowledge.weekly_growth()?,
+            knowledge.most_linked_pages(MOST_LINKED)?,
+            knowledge.orphaned_pages()?,
+        ))
+    })
+    .await;
+    let Ok(Ok((totals, weeks, most_linked, orphans))) = loaded else {
+        return internal_error(&state, &session);
+    };
+    let growth_html = (!weeks.is_empty()).then(|| {
+        let labels: Vec<String> = weeks.iter().map(|w| w.start.clone()).collect();
+        chart::line_chart(
+            "Pages and notes per week",
+            &labels,
+            &[
+                chart::Series {
+                    label: "pages".into(),
+                    color: "var(--accent)".into(),
+                    values: weeks.iter().map(|w| w.pages).collect(),
+                },
+                chart::Series {
+                    label: "notes".into(),
+                    color: "var(--type-2)".into(),
+                    values: weeks.iter().map(|w| w.notes).collect(),
+                },
+            ],
+        )
+    });
+    StatsTemplate {
+        header: Header::new(&state, &session).live("/stats".to_owned()),
+        totals,
+        growth_html,
+        most_linked: most_linked
+            .into_iter()
+            .map(|node| LinkedPage {
+                url: page_url(&node.title),
+                title: node.title,
+                links: node.degree,
+            })
+            .collect(),
+        orphans: orphans
+            .into_iter()
+            .map(|node| LinkItem {
+                url: page_url(&node.title),
+                title: node.title,
+                stub: false,
+            })
+            .collect(),
+        has_mermaid: false,
     }
     .into_response()
 }

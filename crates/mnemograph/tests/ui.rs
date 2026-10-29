@@ -402,3 +402,67 @@ async fn the_wiki_graph_updates_live() {
     .expect("no update within 5 seconds");
     assert!(received.contains("&#34;Cargo&#34;"), "{received}");
 }
+
+/// The number shown for a total on the dashboard.
+fn total(html: &str, name: &str) -> u32 {
+    let marker = format!("<dt>{name}</dt><dd>");
+    let start = html
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no {name}: {html}"))
+        + marker.len();
+    let end = start + html[start..].find('<').unwrap();
+    html[start..end].parse().unwrap()
+}
+
+#[tokio::test]
+async fn the_dashboard_shows_totals_growth_and_link_structure() {
+    let ui = Ui::start().await;
+    let (status, empty) = ui.html("/stats").await;
+    assert_eq!(status, 200);
+    assert!(
+        empty.contains("<a href=\"/stats\">Statistics</a>"),
+        "header link"
+    );
+    assert_eq!(total(&empty, "pages"), 0);
+    assert!(empty.contains("Nothing written yet."));
+
+    ui.call(
+        "write_page",
+        json!({ "title": "Hub", "body": "[[A]] [[B]] [[Stub]]" }),
+    )
+    .await;
+    ui.call("write_page", json!({ "title": "A", "body": "[[B]]" }))
+        .await;
+    ui.call("write_page", json!({ "title": "B", "body": "" }))
+        .await;
+    ui.call("write_page", json!({ "title": "Alone", "body": "" }))
+        .await;
+    ui.call("add_note", json!({ "body": "About [[Hub]]." }))
+        .await;
+
+    let (_, html) = ui.html("/stats").await;
+    assert_eq!(
+        [
+            total(&html, "pages"),
+            total(&html, "stubs"),
+            total(&html, "links"),
+            total(&html, "notes"),
+            total(&html, "revisions"),
+        ],
+        [4, 1, 5, 1, 4]
+    );
+    assert!(html.contains("<figure class=\"chart\">"), "{html}");
+    assert!(
+        html.contains("pages (4)") && html.contains("notes (1)"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<li><a href=\"/pages/Hub\">Hub</a> <span class=\"meta\">3</span></li>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<li><a href=\"/pages/Alone\">Alone</a></li>"),
+        "{html}"
+    );
+    assert!(html.contains("data-init=\"@get(&#39;/live?view=%2Fstats&#39;)\""));
+}
