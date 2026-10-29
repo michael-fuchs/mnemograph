@@ -166,6 +166,7 @@ impl Ui {
                     owner_group: "mnemograph_owner".into(),
                     secure_cookies: false,
                 }),
+                graph_max_nodes: mnemograph::web::DEFAULT_GRAPH_NODES,
                 shutdown: shutdown.child_token(),
             },
         );

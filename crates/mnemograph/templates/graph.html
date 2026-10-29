@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Graph – mnemograph{% endblock %}
+{% block content %}
+<h1>Graph</h1>
+<form class="graph-filter" method="get" action="/graph">
+  {% for choice in types %}
+  <label><input type="checkbox" name="type" value="{{ choice.page_type }}"{% if choice.checked %} checked{% endif %}>
+    <span class="swatch" style="background: var(--type-{{ choice.color }})"></span> {{ choice.page_type }}</label>
+  {% endfor %}
+  <button type="submit">Show</button>
+  {% if filtered %}<a href="/graph">Show all</a>{% endif %}
+</form>
+{% if graph.nodes == 0 %}
+<p class="empty">{% if filtered %}No pages of these types yet.{% else %}Nothing written yet.{% endif %}</p>
+{% else %}
+{% if hidden > 0 %}
+<p class="notice">Showing the {{ graph.nodes }} most-linked pages and stubs; {{ hidden }} more are hidden. Choose page types to see others.</p>
+{% endif %}
+<mnemo-graph graph="{{ graph.json }}" class="wiki" mode="wiki"></mnemo-graph>
+{% call m::legend(graph, false) %}{% endcall %}
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="/assets/cytoscape.min.js"></script>
+<script src="/assets/graph.js"></script>
+{% endblock %}

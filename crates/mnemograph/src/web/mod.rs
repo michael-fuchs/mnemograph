@@ -1,5 +1,5 @@
 //! The owner's read-only web UI: browse pages, stubs and notes with their neighborhood graphs,
-//! search, and page histories.
+//! the whole wiki as a graph, search, and page histories.
 //! Open views update themselves when agents write (Datastar over server-sent events).
 
 mod live;
@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use askama::Template;
 use askama_web::WebTemplate;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
-use mnemograph_core::{Author, Found, Knowledge, MAX_HOPS, Neighborhood, Note, Session, title_key};
+use mnemograph_core::{
+    Author, Found, Knowledge, MAX_HOPS, Neighborhood, Note, Session, WikiGraph, title_key,
+};
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +32,8 @@ const RECENT_NOTES: u32 = 20;
 const SEARCH_HITS: usize = 50;
 /// How many pages and stubs a neighborhood graph shows at most, nearest first.
 const GRAPH_NODES: u32 = 150;
+/// How many pages and stubs the whole-wiki graph shows at most unless configured otherwise.
+pub const DEFAULT_GRAPH_NODES: usize = 300;
 
 /// What the web handlers share.
 pub struct WebState {
@@ -37,6 +41,8 @@ pub struct WebState {
     /// `None`: no login, everyone is the owner (development on loopback only).
     pub login: Option<LoginSettings>,
     pending_logins: PendingLogins,
+    /// The most pages and stubs the whole-wiki graph shows.
+    graph_max_nodes: usize,
     /// Changes whenever agents write.
     changes: watch::Receiver<u64>,
     /// Ends the live update streams when the server shuts down.
@@ -47,6 +53,7 @@ pub struct WebState {
 pub fn router(
     knowledge: Arc<Knowledge>,
     login: Option<LoginSettings>,
+    graph_max_nodes: usize,
     changes: watch::Receiver<u64>,
     shutdown: CancellationToken,
 ) -> Router {
@@ -54,12 +61,14 @@ pub fn router(
         knowledge,
         login,
         pending_logins: PendingLogins::default(),
+        graph_max_nodes,
         changes,
         shutdown,
     });
     let owner_only = Router::new()
         .route("/", get(index))
         .route("/search", get(search))
+        .route("/graph", get(graph))
         .route("/pages/{title}", get(page))
         .route("/pages/{title}/history", get(history))
         .route("/pages/{title}/revisions/{number}", get(revision))
@@ -139,13 +148,15 @@ struct LinkItem {
     stub: bool,
 }
 
-/// A neighborhood graph for the `mnemo-graph` element: the data as JSON, and a legend of the
-/// page types that occur in it.
+/// A graph for the `mnemo-graph` element: the data as JSON, and a legend of the page types
+/// that occur in it.
 struct GraphView {
     json: String,
     legend: Vec<LegendItem>,
-    /// False if nothing is linked with the page or stub, so there is nothing to draw.
-    connected: bool,
+    /// Number of pages and stubs in the graph.
+    nodes: usize,
+    /// Whether any of them is a stub.
+    stubs: bool,
 }
 
 struct LegendItem {
@@ -158,44 +169,79 @@ struct LegendItem {
 const TYPE_COLORS: usize = 8;
 
 impl GraphView {
-    fn new(graph: &Neighborhood, page_types: &[String]) -> Self {
+    /// A page's or stub's neighborhood; nodes carry their distance from it.
+    fn neighborhood(graph: &Neighborhood, page_types: &[String]) -> Self {
+        Self::build(
+            graph.nodes.iter().map(|node| {
+                let fields = serde_json::json!({ "distance": node.distance });
+                (&node.title, node.page_type.as_deref(), node.stub, fields)
+            }),
+            &graph.edges,
+            page_types,
+        )
+    }
+
+    /// The whole wiki; nodes carry how many others they are linked with.
+    fn wiki(graph: &WikiGraph, page_types: &[String]) -> Self {
+        Self::build(
+            graph.nodes.iter().map(|node| {
+                let fields = serde_json::json!({ "degree": node.degree });
+                (&node.title, node.page_type.as_deref(), node.stub, fields)
+            }),
+            &graph.edges,
+            page_types,
+        )
+    }
+
+    fn empty() -> Self {
+        Self {
+            json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+            legend: Vec::new(),
+            nodes: 0,
+            stubs: false,
+        }
+    }
+
+    /// Nodes as (title, page type, stub, further fields).
+    fn build<'a>(
+        nodes: impl Iterator<Item = (&'a String, Option<&'a str>, bool, serde_json::Value)>,
+        edges: &[(usize, usize)],
+        page_types: &[String],
+    ) -> Self {
         let color = |page_type: &str| {
             page_types
                 .iter()
                 .position(|t| t == page_type)
                 .map(|i| i % TYPE_COLORS)
         };
-        let nodes: Vec<_> = graph
-            .nodes
-            .iter()
-            .map(|node| {
-                serde_json::json!({
-                    "label": node.title,
-                    "url": page_url(&node.title),
-                    "stub": node.stub,
-                    "distance": node.distance,
-                    "color": node.page_type.as_deref().and_then(color),
-                })
+        let mut types = std::collections::BTreeSet::new();
+        let mut stubs = false;
+        let nodes: Vec<_> = nodes
+            .map(|(title, page_type, stub, mut fields)| {
+                types.extend(page_type);
+                stubs |= stub;
+                fields["label"] = title.as_str().into();
+                fields["url"] = page_url(title).into();
+                fields["stub"] = stub.into();
+                fields["color"] = page_type.and_then(color).into();
+                fields
             })
             .collect();
-        let mut legend: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter_map(|node| node.page_type.clone())
-            .collect::<std::collections::BTreeSet<_>>()
+        let mut legend: Vec<_> = types
             .into_iter()
             .filter_map(|page_type| {
                 Some(LegendItem {
-                    color: color(&page_type)?,
-                    page_type,
+                    color: color(page_type)?,
+                    page_type: page_type.to_owned(),
                 })
             })
             .collect();
         legend.sort_by_key(|item| item.color);
         Self {
-            json: serde_json::json!({ "nodes": nodes, "edges": graph.edges }).to_string(),
+            json: serde_json::json!({ "nodes": nodes, "edges": edges }).to_string(),
             legend,
-            connected: graph.nodes.len() > 1,
+            nodes: nodes.len(),
+            stubs,
         }
     }
 }
@@ -307,6 +353,23 @@ struct RevisionTemplate {
     has_mermaid: bool,
 }
 
+struct TypeChoice {
+    page_type: String,
+    color: usize,
+    checked: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "graph.html")]
+struct GraphTemplate {
+    header: Header,
+    types: Vec<TypeChoice>,
+    filtered: bool,
+    graph: GraphView,
+    hidden: usize,
+    has_mermaid: bool,
+}
+
 #[derive(Template, WebTemplate)]
 #[template(path = "message.html")]
 struct MessageTemplate {
@@ -378,12 +441,8 @@ async fn page(
         return internal_error(&state, &session);
     };
     let graph = graph
-        .map(|graph| GraphView::new(&graph, state.knowledge.page_types()))
-        .unwrap_or_else(|| GraphView {
-            json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
-            legend: Vec::new(),
-            connected: false,
-        });
+        .map(|graph| GraphView::neighborhood(&graph, state.knowledge.page_types()))
+        .unwrap_or_else(GraphView::empty);
     let header = Header::new(&state, &session);
     let backlinks = links
         .backlinks
@@ -456,6 +515,78 @@ async fn page(
         updated_by: author_label(page.author.as_ref()),
     }
     .into_response()
+}
+
+/// The whole wiki as a graph, optionally only pages of some types (`?type=a&type=b`).
+async fn graph(
+    State(state): State<Arc<WebState>>,
+    Extension(session): Extension<Session>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let page_types = state.knowledge.page_types().to_vec();
+    let chosen = chosen_types(query.as_deref().unwrap_or(""), &page_types);
+    let knowledge = state.knowledge.clone();
+    let max_nodes = state.graph_max_nodes;
+    let filter = chosen.clone();
+    let loaded =
+        tokio::task::spawn_blocking(move || knowledge.wiki_graph(&filter, max_nodes)).await;
+    let Ok(Ok(graph)) = loaded else {
+        return internal_error(&state, &session);
+    };
+    let view = match graph_query(&chosen).as_str() {
+        "" => "/graph".to_owned(),
+        query => format!("/graph?{query}"),
+    };
+    GraphTemplate {
+        header: Header::new(&state, &session).live(view),
+        types: page_types
+            .iter()
+            .enumerate()
+            .map(|(i, page_type)| TypeChoice {
+                checked: chosen.contains(page_type),
+                page_type: page_type.clone(),
+                color: i % TYPE_COLORS,
+            })
+            .collect(),
+        filtered: !chosen.is_empty(),
+        hidden: graph.hidden,
+        graph: GraphView::wiki(&graph, &page_types),
+        has_mermaid: false,
+    }
+    .into_response()
+}
+
+/// The known page types among a query's `type` parameters, in the configured order.
+fn chosen_types(query: &str, page_types: &[String]) -> Vec<String> {
+    let given: HashSet<String> = query
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("type="))
+        .filter_map(|value| {
+            percent_encoding::percent_decode_str(&value.replace('+', " "))
+                .decode_utf8()
+                .ok()
+                .map(|t| t.trim().to_lowercase())
+        })
+        .collect();
+    page_types
+        .iter()
+        .filter(|t| given.contains(*t))
+        .cloned()
+        .collect()
+}
+
+/// The query string that chooses these page types.
+fn graph_query(page_types: &[String]) -> String {
+    page_types
+        .iter()
+        .map(|t| {
+            format!(
+                "type={}",
+                percent_encoding::utf8_percent_encode(t, percent_encoding::NON_ALPHANUMERIC)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 #[derive(Deserialize)]

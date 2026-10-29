@@ -35,6 +35,7 @@ impl TestServer {
                 allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
                 limits,
                 web_login: None,
+                graph_max_nodes: mnemograph::web::DEFAULT_GRAPH_NODES,
                 shutdown: shutdown.child_token(),
             },
         );

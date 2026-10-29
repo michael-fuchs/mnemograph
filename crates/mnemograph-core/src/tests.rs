@@ -914,6 +914,120 @@ fn the_neighborhood_resolves_aliases_and_starts_from_stubs() {
     ));
 }
 
+/// The whole-wiki graph as (title, degree, stub), its links as sorted title pairs, and the
+/// number of hidden nodes.
+fn wiki_graph(knowledge: &Knowledge, page_types: &[&str], max_nodes: usize) -> (Graph, usize) {
+    let types: Vec<String> = page_types.iter().map(|t| t.to_string()).collect();
+    let graph = knowledge.wiki_graph(&types, max_nodes).unwrap();
+    let title_of = |i: usize| graph.nodes[i].title.clone();
+    let mut edges: Vec<_> = graph
+        .edges
+        .iter()
+        .map(|&(a, b)| {
+            let (a, b) = (title_of(a), title_of(b));
+            if a < b { (a, b) } else { (b, a) }
+        })
+        .collect();
+    edges.sort();
+    let nodes = graph
+        .nodes
+        .into_iter()
+        .map(|n| (n.title, n.degree, n.stub))
+        .collect();
+    ((nodes, edges), graph.hidden)
+}
+
+fn typed(knowledge: &Knowledge, title: &str, page_type: &str, body: &str) {
+    knowledge
+        .write_page(
+            title,
+            body,
+            None,
+            PageChanges {
+                page_type: Some(Some(page_type.into())),
+                ..Default::default()
+            },
+            &author(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_wiki_graph_has_every_page_and_stub_most_linked_first() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rust",
+            "[[Rust]]",
+            None,
+            PageChanges {
+                aliases: Some(vec!["rustlang".into()]),
+                ..Default::default()
+            },
+            &author(),
+        )
+        .unwrap();
+    // Links under the title and an alias, in both directions, count as one.
+    create(
+        &knowledge,
+        "mnemograph",
+        "[[Rust]] [[rustlang]] [[Tantivy]]",
+    );
+    create(&knowledge, "Ferris", "[[RUST]] [[mnemograph]]");
+    create(&knowledge, "Alone", "");
+
+    let ((nodes, edges), hidden) = wiki_graph(&knowledge, &[], 100);
+    assert_eq!(
+        nodes,
+        [
+            r("mnemograph", 3, false),
+            r("Ferris", 2, false),
+            r("Rust", 2, false),
+            r("Tantivy", 1, true),
+            r("Alone", 0, false),
+        ]
+    );
+    assert_eq!(
+        edges,
+        [
+            e("Ferris", "Rust"),
+            e("Ferris", "mnemograph"),
+            e("Rust", "mnemograph"),
+            e("Tantivy", "mnemograph")
+        ]
+    );
+    assert_eq!(hidden, 0);
+}
+
+#[test]
+fn the_wiki_graph_filters_by_page_type_and_keeps_the_most_linked() {
+    let knowledge = knowledge();
+    typed(
+        &knowledge,
+        "mnemograph",
+        "project",
+        "[[Rust]] [[SQLite]] [[Caddy]] [[Stub]]",
+    );
+    typed(&knowledge, "Rust", "technology", "[[SQLite]]");
+    typed(&knowledge, "SQLite", "technology", "");
+    typed(&knowledge, "Caddy", "tool", "");
+
+    // Only technologies: no project, no tool, no stubs; links among the shown pages only.
+    let ((nodes, edges), hidden) = wiki_graph(&knowledge, &["technology"], 100);
+    assert_eq!(nodes, [r("Rust", 1, false), r("SQLite", 1, false)]);
+    assert_eq!(edges, [e("Rust", "SQLite")]);
+    assert_eq!(hidden, 0);
+
+    let ((nodes, _), _) = wiki_graph(&knowledge, &["technology", "tool"], 100);
+    assert_eq!(nodes.len(), 3);
+
+    // Above the limit, the most-linked stay and the rest are counted.
+    let ((nodes, edges), hidden) = wiki_graph(&knowledge, &[], 2);
+    assert_eq!(nodes, [r("mnemograph", 4, false), r("Rust", 2, false)]);
+    assert_eq!(edges, [e("Rust", "mnemograph")]);
+    assert_eq!(hidden, 3);
+}
+
 #[test]
 fn a_page_without_links_has_no_related_pages() {
     let knowledge = knowledge();

@@ -26,6 +26,7 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--max-page-bytes` | `MNEMOGRAPH_MAX_PAGE_BYTES` | `204800` (200 KiB) |
 | `--max-note-bytes` | `MNEMOGRAPH_MAX_NOTE_BYTES` | `4096` (4 KiB) |
 | `--writes-per-minute` | `MNEMOGRAPH_WRITES_PER_MINUTE` | `60` per agent |
+| `--graph-max-nodes` | `MNEMOGRAPH_GRAPH_MAX_NODES` | `300` pages and stubs in the whole-wiki graph |
 
 `cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`. `cargo run -- delete page <title>` and `cargo run -- delete note <id>` permanently delete a page (with its revisions and aliases; links to it become stubs) or a note, after confirmation (`--yes` skips it). Agents cannot delete anything. These commands need exclusive access, so stop `serve` first.
 
@@ -62,10 +63,11 @@ With authentication on, `http://localhost:8080/` asks the owner to log in at the
 - the page list with recent notes;
 - pages with rendered Markdown (tables, task lists, footnotes, alerts, Mermaid diagrams), links, backlinks and notes, and stubs with what links to them;
 - a graph of each page's and stub's neighborhood: everything within 1, 2 or 3 links (like `related`), with stubs and page types marked; clicking a node opens it;
+- a graph of the whole wiki ("Graph" in the header): every page, including unlinked ones, and every stub, filterable by page type. Above `--graph-max-nodes` only the most-linked are shown, and the page says how many are hidden. In both graphs, the most important nodes get labels first; zooming in or pointing at a node shows the rest;
 - search over pages and notes, optionally limited to a page type;
 - each page's history with author and time of every revision, and any revision rendered as it was.
 
-The page list, pages and histories update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
+The page list, pages, histories and graphs update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
 
 "Log out" ends the mnemograph session; the provider's own session stays, so logging in again does not ask for the password.
 

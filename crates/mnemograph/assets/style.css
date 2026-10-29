@@ -21,7 +21,10 @@ header.site {
   display: flex; justify-content: space-between; align-items: center;
   padding: 0.6rem 1rem; border-bottom: 1px solid var(--line);
 }
+.site-nav { display: flex; gap: 1rem; align-items: baseline; }
 .brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.site-nav a:not(.brand) { color: var(--muted); text-decoration: none; }
+.site-nav a:not(.brand):hover { color: var(--fg); }
 .session { display: flex; gap: 0.6rem; align-items: center; margin: 0; color: var(--muted); }
 .session button {
   font: inherit; font-size: 0.9rem; padding: 0.2rem 0.7rem; cursor: pointer;
@@ -73,9 +76,16 @@ mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: in
 mnemo-graph { height: 28rem; border: 1px solid var(--line); border-radius: 6px; }
 .legend { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
 .legend > span { white-space: nowrap; }
-.legend .swatch {
+mnemo-graph.wiki { height: 70vh; min-height: 24rem; }
+.graph-filter { display: flex; flex-wrap: wrap; gap: 0.3rem 0.9rem; align-items: center; margin: 0.5rem 0 1rem; }
+.graph-filter label { white-space: nowrap; cursor: pointer; }
+.graph-filter button {
+  font: inherit; font-size: 0.9rem; padding: 0.2rem 0.8rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg);
+}
+.swatch {
   display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 50%;
   border: 1.5px solid var(--muted); vertical-align: -0.05rem;
 }
-.legend .swatch.center { border: 3px solid var(--accent); }
-.legend .swatch.stub { border-style: dashed; border-color: var(--stub); }
+.swatch.center { border: 3px solid var(--accent); }
+.swatch.stub { border-style: dashed; border-color: var(--stub); }
