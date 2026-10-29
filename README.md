@@ -27,6 +27,7 @@ This creates `mnemograph.db` (the data) and `mnemograph.db.search/` (the search 
 | `--max-note-bytes` | `MNEMOGRAPH_MAX_NOTE_BYTES` | `4096` (4 KiB) |
 | `--writes-per-minute` | `MNEMOGRAPH_WRITES_PER_MINUTE` | `60` per agent |
 | `--graph-max-nodes` | `MNEMOGRAPH_GRAPH_MAX_NODES` | `300` pages and stubs in the whole-wiki graph |
+| `--access-log-days` | `MNEMOGRAPH_ACCESS_LOG_DAYS` | `90` days of agents' reads and searches |
 
 `cargo run -- reindex` rebuilds the search index on demand. `cargo run -- export <dir>` writes every page as a Markdown file with a YAML header (title, type, aliases) to `<dir>/pages/` and all notes to `<dir>/notes.jsonl`. `cargo run -- delete page <title>` and `cargo run -- delete note <id>` permanently delete a page (with its revisions and aliases; links to it become stubs) or a note, after confirmation (`--yes` skips it). Agents cannot delete anything. These commands need exclusive access, so stop `serve` first.
 
@@ -65,7 +66,7 @@ With authentication on, `http://localhost:8080/` asks the owner to log in at the
 - a graph of each page's and stub's neighborhood: everything within 1, 2 or 3 links (like `related`), with stubs and page types marked; clicking a node opens it;
 - a graph of the whole wiki ("Graph" in the header): every page, including unlinked ones, and every stub, filterable by page type. Above `--graph-max-nodes` only the most-linked are shown, and the page says how many are hidden. In both graphs, the most important nodes get labels first; zooming in or pointing at a node shows the rest;
 - search over pages and notes, optionally limited to a page type;
-- statistics ("Statistics" in the header): totals of pages, stubs, links, notes and revisions, a chart of pages and notes per week, activity per author (revisions and notes per week, with totals and first and latest day), the most-linked pages and orphaned pages;
+- statistics ("Statistics" in the header): totals of pages, stubs, links, notes and revisions, a chart of pages and notes per week, activity per author (revisions and notes per week, with totals and first and latest day), what agents read and searched (per agent and week, the most-read pages, and searches that found nothing as knowledge gaps), the most-linked pages and orphaned pages. Agents' `read_page`, `search` and `related` calls are kept in an access log for `--access-log-days`; what the owner opens in the web UI is not logged;
 - each page's history with author and time of every revision, and any revision rendered as it was.
 
 The page list, pages, histories, graphs and statistics update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.

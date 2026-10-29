@@ -4,6 +4,7 @@
 //! source of truth (ADR 0003). The API is synchronous; async callers should run it on a
 //! blocking thread.
 
+mod access;
 mod author;
 mod delete;
 mod export;
@@ -21,6 +22,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+pub use access::{Access, AgentAccess, KnowledgeGap, PageReads};
 pub use author::Author;
 pub use delete::DeletedPage;
 pub use export::ExportSummary;

@@ -36,6 +36,7 @@ impl Ui {
                 limits: Default::default(),
                 web_login: None,
                 graph_max_nodes,
+                access_log_days: mnemograph::DEFAULT_ACCESS_LOG_DAYS,
                 shutdown: shutdown.child_token(),
             },
         );
@@ -62,6 +63,18 @@ impl Ui {
             shutdown,
             _dir: dir,
         }
+    }
+
+    /// Calls a tool and returns whether it failed.
+    async fn try_call(&self, tool: &'static str, args: Value) -> bool {
+        let result = self
+            .agent
+            .call_tool(
+                CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        result.is_error == Some(true)
     }
 
     async fn call(&self, tool: &'static str, args: Value) {
@@ -474,4 +487,110 @@ async fn the_dashboard_shows_totals_growth_and_link_structure() {
         html.contains("<tr><td class=\"nowrap\">anonymous</td><td class=\"num\">4</td><td class=\"num\">1</td>"),
         "{html}"
     );
+}
+
+#[tokio::test]
+async fn the_dashboard_shows_what_agents_read_and_searched() {
+    let ui = Ui::start().await;
+    let (_, empty) = ui.html("/stats").await;
+    assert!(
+        empty.contains("No agent has read or searched anything in the last 90 days."),
+        "{empty}"
+    );
+
+    ui.call(
+        "write_page",
+        json!({ "title": "Rust", "body": "Ferris.", "aliases": ["rustlang"] }),
+    )
+    .await;
+    ui.call("read_page", json!({ "title": "rustlang" })).await;
+    ui.call("read_page", json!({ "title": "Rust" })).await;
+    assert!(
+        ui.try_call("read_page", json!({ "title": "Nothing" }))
+            .await
+    );
+    ui.call("search", json!({ "query": "Ferris" })).await;
+    ui.call("search", json!({ "query": "Garage <b>backup</b>" }))
+        .await;
+    ui.call("search", json!({ "query": "garage  <B>backup</B>" }))
+        .await;
+    ui.call("related", json!({ "title": "Rust" })).await;
+
+    let (_, html) = ui.html("/stats").await;
+    assert!(html.contains("kept for 90 days"), "{html}");
+    assert!(
+        html.contains("anonymous (7)"),
+        "access chart legend: {html}"
+    );
+    assert!(
+        html.contains(
+            "<tr><td class=\"nowrap\">anonymous</td><td class=\"num\">3</td><td class=\"num\">3</td><td class=\"num\">1</td>"
+        ),
+        "{html}"
+    );
+    // Reads through the alias count for the page; the failed read does not.
+    assert!(
+        html.contains("<li><a href=\"/pages/Rust\">Rust</a> <span class=\"meta\">2</span></li>"),
+        "{html}"
+    );
+    // The same terms count once, shown as last searched, escaped, and linked to a search.
+    assert!(
+        html.contains(
+            "<a href=\"/search?q=garage%20%20%3CB%3Ebackup%3C/B%3E\">garage  &#60;B&#62;backup&#60;/B&#62;</a> <span class=\"meta\">×2</span>"
+        ),
+        "{html}"
+    );
+    assert!(
+        !html.contains(">Ferris</a>"),
+        "searches with hits are no gaps"
+    );
+}
+
+#[tokio::test]
+async fn old_access_log_entries_are_pruned_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let knowledge = Arc::new(Knowledge::open(dir.path().join("prune.db")).unwrap());
+    let agent = mnemograph_core::Author::Agent("claude-code".into());
+    knowledge
+        .record_access(&agent, mnemograph_core::Access::Search, "recent", 0)
+        .unwrap();
+    // A search older than a 7-day retention: written directly into the database file.
+    backdate_access_log(&dir.path().join("prune.db"));
+    knowledge
+        .record_access(&agent, mnemograph_core::Access::Search, "kept", 0)
+        .unwrap();
+    assert_eq!(knowledge.knowledge_gaps(10).unwrap().len(), 2);
+
+    let shutdown = CancellationToken::new();
+    let _app = mnemograph::app(
+        knowledge.clone(),
+        AppConfig {
+            auth: None,
+            allowed_hosts: vec!["127.0.0.1".into()],
+            limits: Default::default(),
+            web_login: None,
+            graph_max_nodes: mnemograph::web::DEFAULT_GRAPH_NODES,
+            access_log_days: 7,
+            shutdown: shutdown.child_token(),
+        },
+    );
+    let pruned = tokio::time::timeout(Duration::from_secs(5), async {
+        while knowledge.knowledge_gaps(10).unwrap().len() != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    shutdown.cancel();
+    assert!(pruned.is_ok(), "the old entry was not pruned");
+    assert_eq!(knowledge.knowledge_gaps(10).unwrap()[0].terms, "kept");
+}
+
+/// Moves every access log entry so far 30 days into the past.
+fn backdate_access_log(db: &std::path::Path) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "UPDATE access SET at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')",
+        [],
+    )
+    .unwrap();
 }

@@ -105,6 +105,7 @@ mnemo-graph.wiki { height: 70vh; min-height: 24rem; }
 ol.ranked { padding-left: 1.4rem; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-scroll { overflow-x: auto; }
+ul.gaps { padding-left: 1.2rem; }
 @media (max-width: 34rem) {
   header.site { flex-wrap: wrap; row-gap: 0.5rem; }
   header.site form.search { order: 3; flex-basis: 100%; max-width: none; margin: 0; }

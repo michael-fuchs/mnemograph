@@ -40,6 +40,57 @@
   {% endif %}
 </section>
 
+<section>
+  <h2>Agents' reads and searches</h2>
+  {% if let Some(html) = access_html %}
+  {{ html|safe }}
+  <p class="meta">Reads, searches and explorations per week, kept for {{ access_days }} days. Reads don't refresh this page; reload to see the latest.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Agent</th><th class="num">Reads</th><th class="num">Searches</th><th class="num">Explored</th><th>Latest</th></tr></thead>
+    <tbody>
+      {% for row in agents %}
+      <tr><td class="nowrap">{{ row.agent }}</td><td class="num">{{ row.reads }}</td><td class="num">{{ row.searches }}</td><td class="num">{{ row.related }}</td><td class="nowrap">{{ row.last }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">No agent has read or searched anything in the last {{ access_days }} days.</p>
+  {% endif %}
+</section>
+
+{% if !most_read.is_empty() || !gaps.is_empty() %}
+<div class="columns">
+  <section>
+    <h2>Most-read pages</h2>
+    {% if most_read.is_empty() %}
+    <p class="empty">No pages read yet.</p>
+    {% else %}
+    <ol class="ranked">
+      {% for page in most_read %}
+      <li><a href="{{ page.url }}">{{ page.title }}</a> <span class="meta">{{ page.links }}</span></li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </section>
+  <section>
+    <h2>Knowledge gaps</h2>
+    {% if gaps.is_empty() %}
+    <p class="empty">Every search found something.</p>
+    {% else %}
+    <p class="meta">Searches that found nothing, most recent first.</p>
+    <ul class="gaps">
+      {% for gap in gaps %}
+      <li><a href="/search?q={{ gap.terms|urlencode }}">{{ gap.terms }}</a>{% if gap.times > 1 %} <span class="meta">×{{ gap.times }}</span>{% endif %}
+        <span class="meta">· {{ gap.agent }} · {{ gap.last }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+
 <div class="columns">
   <section>
     <h2>Most-linked pages</h2>

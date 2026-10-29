@@ -18,6 +18,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/0006-change-counter.sql")),
         M::up(include_str!("../migrations/0007-authors.sql")),
         M::up(include_str!("../migrations/0008-sessions.sql")),
+        M::up(include_str!("../migrations/0009-access-log.sql")),
     ])
 }
 
