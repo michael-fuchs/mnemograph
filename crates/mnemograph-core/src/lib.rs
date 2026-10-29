@@ -24,7 +24,7 @@ pub use author::Author;
 pub use delete::DeletedPage;
 pub use export::ExportSummary;
 pub use notes::Note;
-pub use related::{MAX_HOPS, Related};
+pub use related::{MAX_HOPS, Neighborhood, Related};
 pub use sessions::Session;
 
 use search::{IndexedText, Item, SearchIndex};

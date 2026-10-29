@@ -821,6 +821,99 @@ fn related_clamps_hops_and_respects_the_limit() {
     assert_eq!(knowledge.related("A", 3, 2).unwrap().len(), 2);
 }
 
+/// Nodes as (title, distance, stub) and links as sorted title pairs.
+type Graph = (Vec<(String, u32, bool)>, Vec<(String, String)>);
+
+/// The neighborhood as titles with stub flags, and its links as sorted title pairs.
+fn neighborhood(knowledge: &Knowledge, title: &str, hops: u32) -> Graph {
+    let graph = knowledge.neighborhood(title, hops, 100).unwrap();
+    let title_of = |i: usize| graph.nodes[i].title.clone();
+    let mut edges: Vec<_> = graph
+        .edges
+        .iter()
+        .map(|&(a, b)| {
+            let (a, b) = (title_of(a), title_of(b));
+            if a < b { (a, b) } else { (b, a) }
+        })
+        .collect();
+    edges.sort();
+    let nodes = graph
+        .nodes
+        .into_iter()
+        .map(|n| (n.title, n.distance, n.stub))
+        .collect();
+    (nodes, edges)
+}
+
+fn e(a: &str, b: &str) -> (String, String) {
+    (a.to_owned(), b.to_owned())
+}
+
+#[test]
+fn the_neighborhood_has_the_related_pages_and_the_links_between_them() {
+    let knowledge = knowledge();
+    // A → B → C → D, E → A, B ↔ E, and a link to the stub Caddy
+    create(&knowledge, "A", "[[B]]");
+    create(&knowledge, "B", "[[C]] [[E]] [[Caddy]]");
+    create(&knowledge, "C", "[[D]]");
+    create(&knowledge, "D", "");
+    create(&knowledge, "E", "[[A]] [[B]]");
+
+    for hops in 1..=3 {
+        let (nodes, _) = neighborhood(&knowledge, "A", hops);
+        assert_eq!(nodes[0], r("A", 0, false));
+        let mut rest = nodes[1..].to_vec();
+        rest.sort();
+        assert_eq!(rest, related(&knowledge, "A", hops), "{hops} hops");
+    }
+    let (_, edges) = neighborhood(&knowledge, "A", 2);
+    // C → D is outside two hops; B ↔ E counts once.
+    assert_eq!(
+        edges,
+        [
+            e("A", "B"),
+            e("A", "E"),
+            e("B", "C"),
+            e("B", "Caddy"),
+            e("B", "E")
+        ]
+    );
+}
+
+#[test]
+fn the_neighborhood_resolves_aliases_and_starts_from_stubs() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Rust",
+            "[[Rust]]",
+            None,
+            PageChanges {
+                aliases: Some(vec!["rustlang".into()]),
+                ..Default::default()
+            },
+            &author(),
+        )
+        .unwrap();
+    create(&knowledge, "mnemograph", "[[rustlang]] and [[Tantivy]]");
+
+    let (nodes, edges) = neighborhood(&knowledge, "tantivy", 2);
+    assert_eq!(
+        nodes,
+        [
+            r("Tantivy", 0, true),
+            r("mnemograph", 1, false),
+            r("Rust", 2, false)
+        ]
+    );
+    // The self-link of Rust is no edge.
+    assert_eq!(edges, [e("Rust", "mnemograph"), e("Tantivy", "mnemograph")]);
+    assert!(matches!(
+        knowledge.neighborhood("Nothing", 2, 100),
+        Err(Error::PageNotFound(_))
+    ));
+}
+
 #[test]
 fn a_page_without_links_has_no_related_pages() {
     let knowledge = knowledge();

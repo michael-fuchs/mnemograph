@@ -1,4 +1,5 @@
-//! The owner's read-only web UI: browse pages, stubs and notes, search, and page histories.
+//! The owner's read-only web UI: browse pages, stubs and notes with their neighborhood graphs,
+//! search, and page histories.
 //! Open views update themselves when agents write (Datastar over server-sent events).
 
 mod live;
@@ -15,7 +16,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
-use mnemograph_core::{Author, Found, Knowledge, Note, Session, title_key};
+use mnemograph_core::{Author, Found, Knowledge, MAX_HOPS, Neighborhood, Note, Session, title_key};
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +28,8 @@ use render::{page_url, render};
 const RECENT_NOTES: u32 = 20;
 /// How many hits the search page shows.
 const SEARCH_HITS: usize = 50;
+/// How many pages and stubs a neighborhood graph shows at most, nearest first.
+const GRAPH_NODES: u32 = 150;
 
 /// What the web handlers share.
 pub struct WebState {
@@ -74,6 +77,8 @@ pub fn router(
         .route("/assets/style.css", get(style))
         .route("/assets/mermaid.min.js", get(mermaid))
         .route("/assets/datastar.js", get(datastar))
+        .route("/assets/cytoscape.min.js", get(cytoscape))
+        .route("/assets/graph.js", get(graph_script))
         .with_state(state)
 }
 
@@ -134,6 +139,67 @@ struct LinkItem {
     stub: bool,
 }
 
+/// A neighborhood graph for the `mnemo-graph` element: the data as JSON, and a legend of the
+/// page types that occur in it.
+struct GraphView {
+    json: String,
+    legend: Vec<LegendItem>,
+    /// False if nothing is linked with the page or stub, so there is nothing to draw.
+    connected: bool,
+}
+
+struct LegendItem {
+    page_type: String,
+    /// Index of the type's color (`--type-N` in the stylesheet).
+    color: usize,
+}
+
+/// Colors defined for page types in the stylesheet; further types reuse them.
+const TYPE_COLORS: usize = 8;
+
+impl GraphView {
+    fn new(graph: &Neighborhood, page_types: &[String]) -> Self {
+        let color = |page_type: &str| {
+            page_types
+                .iter()
+                .position(|t| t == page_type)
+                .map(|i| i % TYPE_COLORS)
+        };
+        let nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                serde_json::json!({
+                    "label": node.title,
+                    "url": page_url(&node.title),
+                    "stub": node.stub,
+                    "distance": node.distance,
+                    "color": node.page_type.as_deref().and_then(color),
+                })
+            })
+            .collect();
+        let mut legend: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.page_type.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|page_type| {
+                Some(LegendItem {
+                    color: color(&page_type)?,
+                    page_type,
+                })
+            })
+            .collect();
+        legend.sort_by_key(|item| item.color);
+        Self {
+            json: serde_json::json!({ "nodes": nodes, "edges": graph.edges }).to_string(),
+            legend,
+            connected: graph.nodes.len() > 1,
+        }
+    }
+}
+
 struct NoteItem {
     id: i64,
     created_at: String,
@@ -166,6 +232,7 @@ struct PageTemplate {
     links: Vec<LinkItem>,
     backlinks: Vec<LinkItem>,
     notes: Vec<NoteItem>,
+    graph: GraphView,
     has_mermaid: bool,
 }
 
@@ -176,6 +243,7 @@ struct StubTemplate {
     title: String,
     backlinks: Vec<LinkItem>,
     notes: Vec<NoteItem>,
+    graph: GraphView,
     has_mermaid: bool,
 }
 
@@ -293,16 +361,29 @@ async fn page(
     let knowledge = state.knowledge.clone();
     let requested = title.clone();
     let loaded = tokio::task::spawn_blocking(move || {
+        let graph = match knowledge.neighborhood(&requested, MAX_HOPS, GRAPH_NODES) {
+            Ok(graph) => Some(graph),
+            Err(mnemograph_core::Error::PageNotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
         Ok::<_, mnemograph_core::Error>((
             knowledge.page(&requested)?,
             knowledge.links(&requested)?,
             knowledge.notes_about(&requested, RECENT_NOTES)?,
+            graph,
         ))
     })
     .await;
-    let Ok(Ok((page, links, notes))) = loaded else {
+    let Ok(Ok((page, links, notes, graph))) = loaded else {
         return internal_error(&state, &session);
     };
+    let graph = graph
+        .map(|graph| GraphView::new(&graph, state.knowledge.page_types()))
+        .unwrap_or_else(|| GraphView {
+            json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+            legend: Vec::new(),
+            connected: false,
+        });
     let header = Header::new(&state, &session);
     let backlinks = links
         .backlinks
@@ -330,6 +411,7 @@ async fn page(
             title: title.trim().to_owned(),
             backlinks,
             notes,
+            graph,
             has_mermaid,
         }
         .into_response();
@@ -362,6 +444,7 @@ async fn page(
             .collect(),
         backlinks,
         notes,
+        graph,
         has_mermaid: body.has_mermaid || notes_have_mermaid,
         body_html: body.html,
         title: page.title,
@@ -585,6 +668,26 @@ async fn datastar() -> Response {
             (header::CACHE_CONTROL, "public, max-age=604800"),
         ],
         include_str!("../../assets/datastar-1.0.4.js"),
+    )
+        .into_response()
+}
+
+async fn cytoscape() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CONTENT_ENCODING, "gzip"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        include_bytes!("../../assets/cytoscape-3.34.4.min.js.gz").as_slice(),
+    )
+        .into_response()
+}
+
+async fn graph_script() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../../assets/graph.js"),
     )
         .into_response()
 }

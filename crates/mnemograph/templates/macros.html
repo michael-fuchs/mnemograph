@@ -16,3 +16,18 @@
   {% endfor %}
 </ol>
 {% endmacro %}
+
+{% macro graph(graph) %}
+{% if graph.connected %}
+<section class="graph">
+  <h2>Graph</h2>
+  <mnemo-graph graph="{{ graph.json }}"></mnemo-graph>
+  <p class="legend meta">
+    <span><span class="swatch center"></span> this title</span>
+    <span><span class="swatch stub"></span> stub</span>
+    {% for item in graph.legend %}<span><span class="swatch" style="background: var(--type-{{ item.color }})"></span> {{ item.page_type }}</span>
+    {% endfor %}
+  </p>
+</section>
+{% endif %}
+{% endmacro %}
