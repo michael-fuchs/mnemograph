@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -28,6 +28,8 @@ enum View {
     Index,
     Page(String),
     History(String),
+    /// The whole-wiki graph, with its query string (the chosen page types).
+    Graph(String),
 }
 
 impl View {
@@ -35,6 +37,12 @@ impl View {
     fn parse(path: &str) -> Option<Self> {
         if path == "/" {
             return Some(View::Index);
+        }
+        if path == "/graph" {
+            return Some(View::Graph(String::new()));
+        }
+        if let Some(query) = path.strip_prefix("/graph?") {
+            return Some(View::Graph(query.to_owned()));
         }
         let rest = path.strip_prefix("/pages/")?;
         let (encoded, history) = match rest.strip_suffix("/history") {
@@ -98,6 +106,7 @@ async fn render_events(state: &Arc<WebState>, session: &Session, view: &View) ->
         View::Index => super::index(state, session).await,
         View::Page(title) => super::page(state, session, Path(title.clone())).await,
         View::History(title) => super::history(state, session, Path(title.clone())).await,
+        View::Graph(query) => super::graph(state, session, RawQuery(Some(query.clone()))).await,
     };
     if response.status() != StatusCode::OK {
         // The page was renamed or deleted; a reload shows where it went.
@@ -141,6 +150,11 @@ mod tests {
         );
         assert_eq!(View::parse("/pages/Rust/revisions/1"), None);
         assert_eq!(View::parse("/search"), None);
+        assert_eq!(View::parse("/graph"), Some(View::Graph(String::new())));
+        assert_eq!(
+            View::parse("/graph?type=tool&type=project"),
+            Some(View::Graph("type=tool&type=project".into()))
+        );
         assert_eq!(View::parse("https://evil.example/"), None);
     }
 

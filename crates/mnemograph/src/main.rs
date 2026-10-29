@@ -21,7 +21,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the HTTP server with the MCP endpoint at /mcp.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Export all pages (as Markdown files) and notes (as JSONL) into a new directory.
     Export {
         /// Directory to write into; must not exist yet or be empty.
@@ -116,6 +116,9 @@ struct ServeArgs {
     /// Writes (write_page, add_note) each agent may make per minute.
     #[arg(long, env = "MNEMOGRAPH_WRITES_PER_MINUTE", default_value_t = WriteLimits::default().writes_per_minute)]
     writes_per_minute: u32,
+    /// The most pages and stubs the whole-wiki graph shows; the most-linked are kept.
+    #[arg(long, env = "MNEMOGRAPH_GRAPH_MAX_NODES", default_value_t = mnemograph::web::DEFAULT_GRAPH_NODES)]
+    graph_max_nodes: usize,
 }
 
 #[derive(Subcommand)]
@@ -141,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => serve(*args).await,
         Command::Export { dir, db } => export(db, dir),
         Command::Delete { what, db, yes } => delete(db, what, yes),
         Command::Reindex { db } => reindex(db),
@@ -230,6 +233,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_page_bytes,
         max_note_bytes,
         writes_per_minute,
+        graph_max_nodes,
         web_client_id,
         web_client_secret,
         owner_group,
@@ -298,6 +302,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             auth,
             allowed_hosts,
             web_login,
+            graph_max_nodes,
             limits: WriteLimits {
                 max_page_bytes,
                 max_note_bytes,

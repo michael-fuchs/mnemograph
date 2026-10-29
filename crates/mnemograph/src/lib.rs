@@ -33,6 +33,8 @@ pub struct AppConfig {
     /// The owner's browser login for the web UI. `None` disables it: everyone is the owner,
     /// which is only acceptable on a loopback address during development.
     pub web_login: Option<web::login::LoginSettings>,
+    /// The most pages and stubs the whole-wiki graph shows; the most-linked are kept.
+    pub graph_max_nodes: usize,
     /// Cancelling it stops open MCP streams.
     pub shutdown: CancellationToken,
 }
@@ -49,6 +51,7 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
     let web = web::router(
         knowledge.clone(),
         config.web_login,
+        config.graph_max_nodes,
         changes.subscribe(),
         config.shutdown.clone(),
     );

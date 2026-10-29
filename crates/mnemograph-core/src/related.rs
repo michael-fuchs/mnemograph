@@ -31,7 +31,113 @@ pub struct Neighborhood {
     pub edges: Vec<(usize, usize)>,
 }
 
+/// A page or stub in the whole-wiki graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNode {
+    pub title: String,
+    pub page_type: Option<String>,
+    /// True if no page has this title yet.
+    pub stub: bool,
+    /// Number of other nodes in the graph it is linked with, in either direction.
+    pub degree: u32,
+}
+
+/// The whole wiki as a graph, or the part of it that fits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikiGraph {
+    /// Most-linked first, then by title.
+    pub nodes: Vec<GraphNode>,
+    /// Links between nodes as index pairs into `nodes`, regardless of direction, each pair once
+    /// with the smaller index first.
+    pub edges: Vec<(usize, usize)>,
+    /// How many pages and stubs matched but were left out to stay within the limit.
+    pub hidden: usize,
+}
+
 impl Knowledge {
+    /// Returns every page, including unlinked ones, and every stub, with the links between them.
+    /// If `page_types` is not empty, only pages of those types are included, and no stubs (they
+    /// have no type). Of more than `max_nodes` matches, only the most-linked are returned.
+    pub fn wiki_graph(&self, page_types: &[String], max_nodes: usize) -> Result<WikiGraph> {
+        let conn = self.conn();
+        let mut nodes: HashMap<String, (String, Option<String>, bool)> = HashMap::new();
+        let mut pages = conn.prepare("SELECT id, title, page_type FROM page")?;
+        let mut rows = pages.query([])?;
+        while let Some(row) = rows.next()? {
+            let page_type: Option<String> = row.get(2)?;
+            if page_types.is_empty() || page_type.as_ref().is_some_and(|t| page_types.contains(t)) {
+                nodes.insert(
+                    format!("p:{}", row.get::<_, i64>(0)?),
+                    (row.get(1)?, page_type, false),
+                );
+            }
+        }
+        if page_types.is_empty() {
+            // A stub shows as the first link to it wrote it, as in `related`.
+            let mut stubs = conn.prepare(&format!(
+                "SELECT l.target_key, l.target_title FROM link l \
+                 WHERE l.target_key NOT IN (SELECT key FROM ({RESOLVED_KEYS})) \
+                 ORDER BY l.rowid"
+            ))?;
+            let mut rows = stubs.query([])?;
+            while let Some(row) = rows.next()? {
+                nodes
+                    .entry(format!("s:{}", row.get::<_, String>(0)?))
+                    .or_insert((row.get(1)?, None, true));
+            }
+        }
+
+        let mut pairs = BTreeSet::new();
+        let mut query = conn.prepare(&format!(
+            "WITH {} SELECT a, b FROM edge WHERE a <> b",
+            edges()
+        ))?;
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            let (a, b): (String, String) = (row.get(0)?, row.get(1)?);
+            if nodes.contains_key(&a) && nodes.contains_key(&b) {
+                pairs.insert(if a < b { (a, b) } else { (b, a) });
+            }
+        }
+        let mut degree: HashMap<&str, u32> = HashMap::new();
+        for (a, b) in &pairs {
+            *degree.entry(a).or_default() += 1;
+            *degree.entry(b).or_default() += 1;
+        }
+
+        let mut ranked: Vec<_> = nodes
+            .iter()
+            .map(|(id, (title, page_type, stub))| {
+                let node = GraphNode {
+                    title: title.clone(),
+                    page_type: page_type.clone(),
+                    stub: *stub,
+                    degree: degree.get(id.as_str()).copied().unwrap_or(0),
+                };
+                (id.as_str(), node)
+            })
+            .collect();
+        ranked.sort_by_cached_key(|(_, n)| (std::cmp::Reverse(n.degree), n.title.to_lowercase()));
+        let hidden = ranked.len().saturating_sub(max_nodes);
+        ranked.truncate(max_nodes);
+        let index: HashMap<&str, usize> = ranked
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (*id, i))
+            .collect();
+        let mut edges: Vec<_> = pairs
+            .iter()
+            .filter_map(|(a, b)| Some((*index.get(a.as_str())?, *index.get(b.as_str())?)))
+            .map(|(a, b)| (a.min(b), a.max(b)))
+            .collect();
+        edges.sort_unstable();
+        Ok(WikiGraph {
+            nodes: ranked.into_iter().map(|(_, node)| node).collect(),
+            edges,
+            hidden,
+        })
+    }
+
     /// Returns the neighborhood of this title or alias: the same pages and stubs as
     /// [`Knowledge::related`] plus the title itself, and the links between them.
     pub fn neighborhood(&self, title: &str, hops: u32, limit: u32) -> Result<Neighborhood> {

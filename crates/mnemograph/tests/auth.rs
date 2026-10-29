@@ -100,6 +100,7 @@ impl TestServer {
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
+                graph_max_nodes: mnemograph::web::DEFAULT_GRAPH_NODES,
                 shutdown: shutdown.child_token(),
             },
         );

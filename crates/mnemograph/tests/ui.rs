@@ -21,6 +21,10 @@ struct Ui {
 
 impl Ui {
     async fn start() -> Self {
+        Self::start_with(mnemograph::web::DEFAULT_GRAPH_NODES).await
+    }
+
+    async fn start_with(graph_max_nodes: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let knowledge = Knowledge::open(dir.path().join("ui.db")).unwrap();
         let shutdown = CancellationToken::new();
@@ -31,6 +35,7 @@ impl Ui {
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
+                graph_max_nodes,
                 shutdown: shutdown.child_token(),
             },
         );
@@ -303,4 +308,97 @@ async fn pages_and_stubs_show_their_neighborhood_graph() {
         .unwrap();
     assert_eq!(script.status(), 200);
     assert_eq!(script.headers()["content-encoding"], "gzip");
+}
+
+/// Labels of the graph's nodes, in the order sent.
+fn graph_labels(graph: &Value) -> Vec<&str> {
+    graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["label"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_wiki_graph_shows_everything_filters_by_type_and_caps() {
+    let ui = Ui::start_with(3).await;
+    for (title, page_type, body) in [
+        (
+            "mnemograph",
+            "project",
+            "[[Rust]] [[SQLite]] [[Caddy]] [[Garage]]",
+        ),
+        ("Rust", "technology", "[[SQLite]]"),
+        ("SQLite", "technology", ""),
+        ("Caddy", "tool", ""),
+        ("Alone", "concept", ""),
+    ] {
+        ui.call(
+            "write_page",
+            json!({ "title": title, "body": body, "page_type": page_type }),
+        )
+        .await;
+    }
+
+    let (status, html) = ui.html("/graph").await;
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("<a href=\"/graph\">Graph</a>"),
+        "the header links to it"
+    );
+    let graph = graph_data(&html).unwrap();
+    // Six pages and stubs, of which the three most-linked fit.
+    assert_eq!(graph_labels(&graph), ["mnemograph", "Rust", "SQLite"]);
+    assert_eq!(graph["nodes"][0]["degree"], 4);
+    assert!(
+        html.contains("Showing the 3 most-linked pages and stubs; 3 more are hidden."),
+        "{html}"
+    );
+    assert!(html.contains("mode=\"wiki\""));
+
+    let (_, html) = ui.html("/graph?type=tool&type=concept&type=nonsense").await;
+    let graph = graph_data(&html).unwrap();
+    // Unlinked pages are included; stubs are not, having no type.
+    assert_eq!(graph_labels(&graph), ["Alone", "Caddy"]);
+    assert_eq!(graph["edges"], json!([]));
+    assert!(!html.contains("hidden"), "{html}");
+    assert!(
+        !html.contains("swatch stub"),
+        "no stubs, so none in the legend"
+    );
+    assert!(html.contains("value=\"tool\" checked"));
+    assert!(html.contains("value=\"project\">"));
+    assert!(html.contains(
+        "data-init=\"@get(&#39;/live?view=%2Fgraph%3Ftype%3Dtool%26type%3Dconcept&#39;)\""
+    ));
+
+    let (_, html) = ui.html("/graph?type=person").await;
+    assert!(html.contains("No pages of these types yet."));
+}
+
+#[tokio::test]
+async fn the_wiki_graph_updates_live() {
+    let ui = Ui::start().await;
+    ui.call("write_page", json!({ "title": "Rust", "body": "" }))
+        .await;
+    let mut stream = reqwest::get(format!("{}/live?view=%2Fgraph", ui.base))
+        .await
+        .unwrap();
+    ui.call(
+        "write_page",
+        json!({ "title": "Cargo", "body": "[[Rust]]" }),
+    )
+    .await;
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut text = String::new();
+        while !text.contains("</main>") {
+            let chunk = stream.chunk().await.unwrap().expect("stream ended");
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        text
+    })
+    .await
+    .expect("no update within 5 seconds");
+    assert!(received.contains("&#34;Cargo&#34;"), "{received}");
 }
