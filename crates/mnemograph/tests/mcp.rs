@@ -143,6 +143,13 @@ async fn server_lists_its_tools_and_instructions() {
         );
     }
     assert!(instructions.contains("You cannot delete anything"));
+    // Spheres are explained, with the connection's own (without authentication: all).
+    assert!(instructions.contains("Spheres: every page and note"));
+    assert!(instructions.contains("name one with the sphere parameter"));
+    assert!(
+        instructions.contains("This connection's spheres: work."),
+        "{instructions}"
+    );
 }
 
 #[tokio::test]

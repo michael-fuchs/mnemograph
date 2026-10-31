@@ -7,10 +7,14 @@ use mnemograph_core::{
     SearchHit, Visibility, Writer,
 };
 use rmcp::{
-    ServerHandler,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{common::Extension, router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ServerCapabilities, ServerConfig},
-    schemars, tool, tool_handler, tool_router,
+    model::{
+        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerConfig,
+    },
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +48,15 @@ the complete new body with its revision as base_revision. If someone changed it 
 revision: merge your change into it and retry.
 5. Never store secrets such as passwords, tokens or private keys.
 6. You cannot delete anything; tell the owner if something should be removed.";
+
+/// Sent to agents when they connect, after the rules: how spheres work.
+const SPHERES: &str = "\
+Spheres: every page and note belongs to one or more spheres, areas of the owner's life with their \
+own privacy boundary, such as work or private. This connection sees and changes only pages and \
+notes of its spheres; other pages do not exist for it, and links to them are stubs. New pages and \
+notes get this connection's sphere; if it has several, name one with the sphere parameter. To \
+share a page with another of this connection's spheres, or to move it, set its spheres with \
+write_page; spheres this connection cannot see are kept. Keep content in the sphere it belongs to.";
 
 /// How many recent notes read_page returns.
 const RECENT_NOTES: u32 = 10;
@@ -186,6 +199,11 @@ pub struct WritePageArgs {
     /// changing a page.
     #[serde(default)]
     pub sphere: Option<String>,
+    /// Sets the page's spheres: all those of this connection's spheres it should belong to (at
+    /// least one); spheres this connection cannot see are kept. Omit to keep them. For a new
+    /// page, an alternative to sphere.
+    #[serde(default)]
+    pub spheres: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -313,7 +331,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create a page, or change an existing one. To create, omit base_revision (fails if the title or an alias already exists). To change, send the complete new body (not a diff) and the page's current revision as base_revision; omitted page_type and aliases stay as they are. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision. A new page belongs to this connection's sphere; if the connection has several, name one with sphere. Returns the page with its links, marking stubs."
+        description = "Create a page, or change an existing one. To create, omit base_revision (fails if the title or an alias already exists). To change, send the complete new body (not a diff) and the page's current revision as base_revision; omitted page_type and aliases stay as they are. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision. A new page belongs to this connection's sphere; if the connection has several, name one with sphere. spheres sets which of this connection's spheres a page belongs to; others it belongs to are kept. Returns the page with its links, marking stubs."
     )]
     async fn write_page(
         &self,
@@ -336,6 +354,7 @@ impl McpServer {
                     .map(|t| Some(t).filter(|t| !t.trim().is_empty())),
                 aliases: args.aliases,
                 sphere: args.sphere.filter(|s| !s.trim().is_empty()),
+                spheres: args.spheres,
             };
             let page =
                 knowledge.write_page(&args.title, &args.body, base_revision, changes, &writer)?;
@@ -473,9 +492,29 @@ impl McpServer {
         self.changes.send_modify(|count| *count += 1);
     }
 
-    /// Points agents to the usage page by its current title, or nothing while it doesn't exist.
-    fn usage_hint(&self) -> String {
-        match self.knowledge.page(USAGE_PAGE, Visibility::All) {
+    /// The instructions for a caller, naming its spheres if it is known.
+    fn instructions(&self, caller: Option<&Identity>) -> String {
+        let (visibility, connection) = match caller {
+            Some(caller) => (
+                Visibility::Within(&caller.spheres),
+                format!(
+                    " This connection's spheres: {}.",
+                    caller.spheres.names().join(", ")
+                ),
+            ),
+            None => (Visibility::All, String::new()),
+        };
+        format!(
+            "{ABOUT}\n\n{}{INSTRUCTIONS}\n\n{SPHERES}{connection}\n\nAllowed page types: {}.",
+            self.usage_hint(visibility),
+            self.knowledge.page_types().join(", ")
+        )
+    }
+
+    /// Points agents to the usage page by its current title, or nothing while it doesn't exist
+    /// or they cannot see it.
+    fn usage_hint(&self, visibility: Visibility<'_>) -> String {
+        match self.knowledge.page(USAGE_PAGE, visibility) {
             Ok(Some(page)) => format!(
                 "Start here: the page \"{}\" holds the owner's conventions for filing knowledge \
                  (hub pages, decision pages, notes versus pages). Read it with read_page at the \
@@ -497,11 +536,23 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mnemograph", env!("CARGO_PKG_VERSION")))
-            .with_instructions(format!(
-                "{ABOUT}\n\n{}{INSTRUCTIONS}\n\nAllowed page types: {}.",
-                self.usage_hint(),
-                self.knowledge.page_types().join(", ")
-            ))
+            .with_instructions(self.instructions(None))
+    }
+
+    /// Answers like the default, with instructions that name the caller's spheres.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let mut result = self.negotiate_initialize(&request)?;
+        let caller = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|request| request.extensions.get::<Identity>());
+        result.instructions = Some(self.instructions(caller));
+        Ok(result)
     }
 }
 

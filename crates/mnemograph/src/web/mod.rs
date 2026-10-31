@@ -330,6 +330,9 @@ struct RevisionRow {
     created_at: String,
     author: String,
     bytes: usize,
+    spheres: String,
+    /// True if the spheres differ from the previous revision's.
+    spheres_changed: bool,
 }
 
 #[derive(Template, WebTemplate)]
@@ -354,6 +357,7 @@ struct RevisionTemplate {
     revision_title: String,
     page_type: Option<String>,
     aliases: Vec<String>,
+    spheres: String,
     created_at: String,
     author: String,
     body_html: String,
@@ -896,11 +900,19 @@ async fn history(
         return Redirect::permanent(&format!("{}/history", page_url(&current))).into_response();
     }
     let url = page_url(&current);
+    // Newest first: a revision changed the spheres if the next row (the one before it) differs.
+    let previous_spheres: Vec<Option<Vec<String>>> = revisions
+        .iter()
+        .skip(1)
+        .map(|r| Some(r.spheres.clone()))
+        .chain([None])
+        .collect();
     HistoryTemplate {
         header: header.live(format!("{url}/history")),
         rows: revisions
             .into_iter()
-            .map(|r| RevisionRow {
+            .zip(previous_spheres)
+            .map(|(r, previous)| RevisionRow {
                 url: format!("{url}/revisions/{}", r.number),
                 number: r.number,
                 title: r.title,
@@ -908,6 +920,8 @@ async fn history(
                 created_at: timestamp(&r.created_at),
                 author: author_label(r.author.as_ref()),
                 bytes: r.body_bytes,
+                spheres_changed: previous.is_some_and(|p| p != r.spheres),
+                spheres: r.spheres.join(", "),
             })
             .collect(),
         title: current,
@@ -957,6 +971,7 @@ async fn revision(
         revision_title: revision.title,
         page_type: revision.page_type,
         aliases: revision.aliases,
+        spheres: revision.spheres.join(", "),
         created_at: timestamp(&revision.updated_at),
         author: author_label(revision.author.as_ref()),
         body_html: body.html,

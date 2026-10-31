@@ -137,6 +137,7 @@ impl Ui {
                 resource: format!("{base}/mcp"),
                 required_scopes: vec!["mnemograph".into()],
                 spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
+                forbidden_spheres: vec![],
             })
             .await
             .unwrap(),

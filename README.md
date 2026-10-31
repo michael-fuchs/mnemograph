@@ -37,7 +37,7 @@ Without `--oidc-issuer`, authentication is disabled: every agent is anonymous, m
 
 ## Spheres
 
-Every page and note belongs to one or more spheres, areas of the owner's life with their own privacy boundary, such as work and private ([ADR 0008](docs/adr/0008-pages-and-notes-carry-spheres.md)). An agent works only within the spheres of its connection: every tool sees only pages and notes that share a sphere with it, and what it creates gets its sphere. Other pages are treated as not existing: `search` and `related` don't find them, a link to one shows as a stub (revealing nothing beyond the title already written in the linking text), and their own links, backlinks and notes are not shown. Their titles and aliases cannot be taken for new pages ("not available"). A connection with several spheres must name one with the `sphere` parameter of `write_page` and `add_note` when creating; the error lists the choices. Changing a page keeps its spheres. The owner's web UI and the CLI see everything.
+Every page and note belongs to one or more spheres, areas of the owner's life with their own privacy boundary, such as work and private ([ADR 0008](docs/adr/0008-pages-and-notes-carry-spheres.md)). An agent works only within the spheres of its connection: every tool sees only pages and notes that share a sphere with it, and what it creates gets its sphere. Other pages are treated as not existing: `search` and `related` don't find them, a link to one shows as a stub (revealing nothing beyond the title already written in the linking text), and their own links, backlinks and notes are not shown. Their titles and aliases cannot be taken for new pages ("not available"). A connection with several spheres must name one with the `sphere` parameter of `write_page` and `add_note` when creating; the error lists the choices. Changing a page keeps its spheres unless `write_page` sets them with `spheres`: the list (at least one) replaces the page's spheres among the connection's own, and spheres the connection cannot see are kept, so no agent removes a page from another sphere by accident. Every revision records the page's spheres. The instructions agents receive when connecting explain spheres and name the connection's own. The owner's web UI and the CLI see everything.
 
 **Configuring spheres.** The spheres come from a TOML file given with `--spheres`, in the format of the part of the central assistant configuration that mnemograph gets (version 1). [`dev/spheres.toml`](dev/spheres.toml) is a documented example:
 
@@ -51,7 +51,7 @@ description = "Employer, projects, colleagues"
 description = "Family, home, finances"
 ```
 
-Sphere names are lowercase letters, digits and `-`, start with a letter and have at most 32 characters. Sphere rules (`[spheres.<name>.rules]`) are accepted but not applied yet.
+Sphere names are lowercase letters, digits and `-`, start with a letter and have at most 32 characters. Of the sphere rules (`[spheres.<name>.rules]`), mnemograph applies `wiki`: a sphere with `wiki = "never"` must not enter the wiki. Nothing new can be put into it (writes naming it are refused with a message saying so), a token's scope for it is ignored, and a connection made only of such spheres is refused (`403`). What such a sphere already holds stays, and `serve` refuses to start if every sphere is forbidden. The rule `llm` is not used yet.
 
 **One connection per sphere set.** A connection is a pre-registered client at the OIDC provider. Its access tokens name its spheres as scopes `sphere:<name>`; give the client these scopes as default scopes, so that every token carries them. Scopes of spheres that are not configured are ignored, and a token without any configured sphere is refused (`403`, `insufficient_scope`). An agent installation that works in several sphere sets, such as work and private repositories on one machine, registers one client per set, and each repository's MCP configuration picks one:
 
@@ -62,7 +62,7 @@ claude mcp add -s project --transport http --client-id claude-code-work mnemogra
 claude mcp add -s project --transport http --client-id claude-code-private mnemograph https://<host>/mcp
 ```
 
-**Upgrading.** A database from before spheres needs a sphere for its existing pages and notes. Start once with `--default-sphere <name>` (any command, e.g. `serve` or `reindex`); without it, the upgrade stops with an error and changes nothing. For `serve`, the default sphere must be configured.
+**Upgrading.** A database from before spheres needs a sphere for its existing pages and notes. Start once with `--default-sphere <name>` (any command, e.g. `serve` or `reindex`); without it, the upgrade stops with an error and changes nothing. For `serve`, the default sphere must be configured and allowed in the wiki.
 
 ## Authentication
 
@@ -100,7 +100,7 @@ With authentication on, `http://localhost:8080/` asks the owner to log in at the
 - a graph of the whole wiki ("Graph" in the header): every page, including unlinked ones, and every stub, filterable by page type. Above `--graph-max-nodes` only the most-linked are shown, and the page says how many are hidden. In both graphs, the most important nodes get labels first; zooming in or pointing at a node shows the rest;
 - search over pages and notes, optionally limited to a page type;
 - statistics ("Statistics" in the header): totals of pages, stubs, links, notes and revisions, a chart of pages and notes per week, activity per author (revisions and notes per week, with totals and first and latest day), what agents read and searched (per agent and week, the most-read pages, and searches that found nothing as knowledge gaps), the most-linked pages and orphaned pages. Agents' `read_page`, `search` and `related` calls are kept in an access log for `--access-log-days`, with the spheres of the agent's connection, so most-read pages and knowledge gaps can be counted per sphere; what the owner opens in the web UI is not logged;
-- each page's history with author and time of every revision, and any revision rendered as it was.
+- each page's history with author, time and spheres of every revision (changed spheres are highlighted), and any revision rendered as it was.
 
 The page list, pages, histories, graphs and statistics update themselves when agents write (via [Datastar](https://data-star.dev) and server-sent events). Raw HTML in page bodies is never rendered. Without `--oidc-issuer` the UI is open to everyone on the loopback address.
 
@@ -116,7 +116,7 @@ claude mcp add --transport http mnemograph http://localhost:8080/mcp
 
 (With authentication, add `--client-id` with the connection's client, see [Spheres](#spheres).) Claude Code then has these tools:
 
-- `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, or a new title (the old title stays an alias), and for a new page its sphere. `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
+- `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, a new title (the old title stays an alias), for a new page its sphere, and the page's spheres among the connection's own. `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
 - `read_page`: read a page by title or alias, with its current revision, the titles it links to, the pages linking to it and its most recent notes.
 - `search`: full-text search over pages and notes, understanding German and English word forms, optionally limited to one page type; hits come with a snippet.
 - `related`: the pages and stubs within 1–3 links of a page (default 2), following links in both directions, nearest first.

@@ -76,6 +76,13 @@ struct TestServer {
 
 impl TestServer {
     async fn start(keys: &Keys) -> Self {
+        Self::start_with_forbidden(keys, &[]).await
+    }
+
+    /// Configures the spheres work and private, and besides them `forbidden`, whose rule keeps
+    /// them out of the wiki.
+    async fn start_with_forbidden(keys: &Keys, forbidden: &[&str]) -> Self {
+        let forbidden: Vec<String> = forbidden.iter().map(|s| s.to_string()).collect();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let settings = AuthSettings {
@@ -83,6 +90,7 @@ impl TestServer {
             resource: format!("{base}/mcp"),
             required_scopes: vec!["mnemograph".into()],
             spheres: mnemograph_core::Spheres::new(["work", "private"]).unwrap(),
+            forbidden_spheres: forbidden.clone(),
         };
         let authenticator = Authenticator::with_keys(
             settings,
@@ -93,7 +101,11 @@ impl TestServer {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let knowledge = Arc::new(Knowledge::open(dir.path().join("test.db")).unwrap());
+        let knowledge = Arc::new(
+            Knowledge::open(dir.path().join("test.db"))
+                .unwrap()
+                .with_forbidden_spheres(forbidden),
+        );
         let shutdown = CancellationToken::new();
         let app = mnemograph::app(
             knowledge.clone(),
@@ -442,22 +454,16 @@ async fn a_page_in_two_spheres_is_visible_to_both() {
     let private = server
         .client_with_scope(&keys, "mnemograph sphere:private")
         .await;
-    structured(
-        &call(
-            &work,
-            "write_page",
-            json!({ "title": "Rust", "body": "A language." }),
-        )
-        .await,
-    );
-    // Agents cannot change a page's spheres yet, so the owner's database does it.
-    rusqlite::Connection::open(server._dir.path().join("test.db"))
-        .unwrap()
-        .execute(
-            "INSERT INTO page_sphere (page_id, sphere) SELECT id, 'private' FROM page",
-            [],
-        )
-        .unwrap();
+    let both = server
+        .client_with_scope(&keys, "mnemograph sphere:work sphere:private")
+        .await;
+    let created = call(
+        &both,
+        "write_page",
+        json!({ "title": "Rust", "body": "A language.", "spheres": ["work", "private"] }),
+    )
+    .await;
+    assert_eq!(structured(&created)["spheres"], json!(["private", "work"]));
 
     for (client, base) in [(&work, 1), (&private, 2)] {
         let read = call(client, "read_page", json!({ "title": "Rust" })).await;
@@ -608,4 +614,108 @@ async fn no_tool_shows_pages_or_notes_of_another_sphere() {
     };
     assert_eq!(read_by("work"), ["Setup"]);
     assert!(read_by("private").is_empty());
+}
+
+#[tokio::test]
+async fn a_sphere_whose_rule_forbids_the_wiki_is_refused() {
+    let keys = Keys::generate();
+    let server = TestServer::start_with_forbidden(&keys, &["clubs"]).await;
+
+    // A connection made only of forbidden spheres is refused.
+    let mut claims = server.valid_claims();
+    claims["scope"] = json!("mnemograph sphere:clubs");
+    let (status, challenge, body) = server.raw_call(Some(&keys.token("at+jwt", claims))).await;
+    assert_eq!(status, 403);
+    assert!(
+        challenge.unwrap().contains("error=\"insufficient_scope\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("clubs") && body.contains("must not enter the wiki"),
+        "{body}"
+    );
+
+    // With another sphere, the forbidden one is not usable, and naming it says why.
+    let mixed = server
+        .client_with_scope(&keys, "mnemograph sphere:clubs sphere:work")
+        .await;
+    for args in [
+        json!({ "title": "Board", "body": "", "sphere": "clubs" }),
+        json!({ "title": "Board", "body": "", "spheres": ["clubs", "work"] }),
+    ] {
+        let refused = error_text(&call(&mixed, "write_page", args).await);
+        assert!(refused.contains("must not enter the wiki"), "{refused}");
+    }
+    let refused = error_text(
+        &call(
+            &mixed,
+            "add_note",
+            json!({ "body": "Board meeting.", "sphere": "clubs" }),
+        )
+        .await,
+    );
+    assert!(refused.contains("must not enter the wiki"), "{refused}");
+    let written = call(
+        &mixed,
+        "write_page",
+        json!({ "title": "Board", "body": "" }),
+    )
+    .await;
+    assert_eq!(structured(&written)["spheres"], json!(["work"]));
+}
+
+#[tokio::test]
+async fn changing_spheres_keeps_those_the_connection_cannot_see() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let both = server
+        .client_with_scope(&keys, "mnemograph sphere:work sphere:private")
+        .await;
+    let private = server
+        .client_with_scope(&keys, "mnemograph sphere:private")
+        .await;
+    structured(
+        &call(
+            &both,
+            "write_page",
+            json!({ "title": "Rust", "body": "", "sphere": "work" }),
+        )
+        .await,
+    );
+    let shared = call(
+        &both,
+        "write_page",
+        json!({ "title": "Rust", "body": "", "base_revision": 1, "spheres": ["work", "private"] }),
+    )
+    .await;
+    assert_eq!(structured(&shared)["spheres"], json!(["private", "work"]));
+
+    // The private connection cannot see work, so setting only private keeps work.
+    let kept = call(
+        &private,
+        "write_page",
+        json!({ "title": "Rust", "body": "Ferris.", "base_revision": 2, "spheres": ["private"] }),
+    )
+    .await;
+    assert_eq!(structured(&kept)["spheres"], json!(["private", "work"]));
+    let empty = error_text(
+        &call(
+            &private,
+            "write_page",
+            json!({ "title": "Rust", "body": "", "base_revision": 3, "spheres": [] }),
+        )
+        .await,
+    );
+    assert!(empty.contains("at least one sphere"), "{empty}");
+
+    // A connection seeing both can move it out of private; then private no longer sees it.
+    let moved = call(
+        &both,
+        "write_page",
+        json!({ "title": "Rust", "body": "Ferris.", "base_revision": 3, "spheres": ["work"] }),
+    )
+    .await;
+    assert_eq!(structured(&moved)["spheres"], json!(["work"]));
+    let gone = error_text(&call(&private, "read_page", json!({ "title": "Rust" })).await);
+    assert!(gone.contains("no page titled"), "{gone}");
 }

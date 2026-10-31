@@ -1,8 +1,9 @@
 //! The spheres file: mnemograph's part of the central configuration of the owner's assistant.
 //!
 //! The file is generated from the central configuration and mounted read-only. Its format is
-//! the central configuration's (version 1): a table `spheres` with one table per sphere. Keys
-//! mnemograph does not use, such as the sphere rules, are ignored here.
+//! the central configuration's (version 1): a table `spheres` with one table per sphere. Of the
+//! sphere rules, mnemograph applies `wiki`; keys it does not use, such as the rule `llm`, are
+//! ignored.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,6 +27,25 @@ pub struct SphereConfig {
 pub struct Sphere {
     /// What the sphere is about, for people.
     pub description: Option<String>,
+    #[serde(default)]
+    pub rules: Rules,
+}
+
+/// The sphere rules mnemograph applies.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Rules {
+    /// Whether the sphere's content may enter the wiki.
+    #[serde(default)]
+    pub wiki: WikiRule,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WikiRule {
+    #[default]
+    Allowed,
+    /// The sphere's content must not enter the wiki.
+    Never,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +88,26 @@ impl SphereConfig {
     pub fn names(&self) -> Spheres {
         Spheres::new(self.spheres.keys().cloned()).expect("checked when loading")
     }
+
+    /// The spheres whose content may enter the wiki, if any.
+    pub fn allowed(&self) -> Option<Spheres> {
+        Spheres::new(
+            self.spheres
+                .iter()
+                .filter(|(_, sphere)| sphere.rules.wiki == WikiRule::Allowed)
+                .map(|(name, _)| name.clone()),
+        )
+        .ok()
+    }
+
+    /// The spheres whose rule keeps their content out of the wiki.
+    pub fn forbidden(&self) -> Vec<String> {
+        self.spheres
+            .iter()
+            .filter(|(_, sphere)| sphere.rules.wiki == WikiRule::Never)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -82,7 +122,31 @@ mod tests {
     }
 
     #[test]
-    fn ignores_rules_and_keys_it_does_not_use() {
+    fn reads_the_wiki_rule() {
+        let config = SphereConfig::parse(
+            r#"
+            version = 1
+            [spheres.work]
+            rules = { wiki = "never", llm = ["mistral"] }
+            [spheres.private]
+            rules = { wiki = "allowed" }
+            [spheres.clubs]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.allowed().unwrap().names(), ["clubs", "private"]);
+        assert_eq!(config.forbidden(), ["work"]);
+
+        let only_work =
+            SphereConfig::parse("version = 1\n[spheres.work.rules]\nwiki = \"never\"\n").unwrap();
+        assert!(only_work.allowed().is_none());
+        let err = SphereConfig::parse("version = 1\n[spheres.work.rules]\nwiki = \"maybe\"\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("maybe"), "{err:#}");
+    }
+
+    #[test]
+    fn ignores_keys_it_does_not_use() {
         let config = SphereConfig::parse(
             r#"
             version = 1
@@ -90,8 +154,8 @@ mod tests {
             description = "Employer"
             future = true
             [spheres.work.rules]
-            wiki = "never"
             llm = ["mistral"]
+            later = "a rule from a newer configuration"
             "#,
         )
         .unwrap();

@@ -13,7 +13,10 @@ description = "Employer, projects, colleagues"
 [spheres.private]
 description = "Family, home, finances"
 
-# Sphere rules may follow each sphere; mnemograph does not apply them yet:
+# Sphere rules may follow each sphere:
 # [spheres.private.rules]
-# wiki = "allowed"   # or "never": the sphere's content must not enter the wiki
-# llm = ["mistral"]  # the only LLM providers that may receive the sphere's content
+# wiki = "allowed"   # or "never": the sphere's content must not enter the wiki; mnemograph
+#                    # refuses to put anything new into it and connections made only of such
+#                    # spheres
+# llm = ["mistral"]  # the only LLM providers that may receive the sphere's content (not used
+#                    # by mnemograph yet)

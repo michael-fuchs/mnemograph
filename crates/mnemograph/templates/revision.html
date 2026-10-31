@@ -11,6 +11,7 @@
   <p class="meta">
     {% if let Some(t) = page_type %}<span class="type">{{ t }}</span>{% endif %}
     revision {{ number }} · {{ created_at }} by {{ author }}
+    {% if !spheres.is_empty() %}<br>spheres: {{ spheres }}{% endif %}
     {% if !aliases.is_empty() %}<br>also known as: {{ aliases.join(", ") }}{% endif %}
   </p>
   <div class="body">{{ body_html|safe }}</div>

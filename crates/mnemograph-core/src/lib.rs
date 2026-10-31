@@ -81,6 +81,11 @@ pub enum Error {
     SphereNotAllowed { given: String, allowed: Vec<String> },
     #[error("name the sphere it belongs to, one of: {}", .0.join(", "))]
     SphereRequired(Vec<String>),
+    /// A sphere rule of the central configuration keeps this sphere's content out of the wiki.
+    #[error("the sphere {0:?} must not enter the wiki (its sphere rule says wiki = \"never\")")]
+    SphereForbidden(String),
+    #[error("give either sphere or spheres, not both")]
+    SphereAndSpheres,
     /// The name belongs to a page the writer cannot see. The error must not reveal more.
     #[error("the title {0:?} is not available; choose another one")]
     TitleUnavailable(String),
@@ -149,6 +154,10 @@ pub struct PageChanges {
     /// For a new page: the sphere it gets, one of the writer's. It may be left out if the
     /// writer has only one. Ignored when changing a page.
     pub sphere: Option<String>,
+    /// Sets the page's spheres among the writer's: these replace the ones the writer has, and
+    /// those the writer cannot see are kept, so a writer never removes a page from a sphere
+    /// by accident. Must not be empty. For a new page, an alternative to `sphere`.
+    pub spheres: Option<Vec<String>>,
 }
 
 /// One entry of a page's history.
@@ -163,6 +172,8 @@ pub struct RevisionSummary {
     pub author: Option<Author>,
     /// Length of the body in bytes.
     pub body_bytes: usize,
+    /// The page's spheres in this revision, sorted.
+    pub spheres: Vec<String>,
 }
 
 /// A link from a page to a title.
@@ -213,6 +224,8 @@ pub struct Knowledge {
     conn: Mutex<Connection>,
     search: SearchIndex,
     page_types: Vec<String>,
+    /// Spheres whose content must not enter the wiki, by their sphere rule.
+    forbidden_spheres: Vec<String>,
 }
 
 impl Knowledge {
@@ -263,6 +276,7 @@ impl Knowledge {
             conn: Mutex::new(conn),
             search,
             page_types: DEFAULT_PAGE_TYPES.iter().map(|t| t.to_string()).collect(),
+            forbidden_spheres: Vec::new(),
         };
         let counter = change_counter(&knowledge.conn())?;
         if knowledge.search.change_counter() != Some(counter) {
@@ -392,6 +406,60 @@ impl Knowledge {
         self
     }
 
+    /// Sets the spheres whose content must not enter the wiki: nothing new can be put into
+    /// them. What they already hold stays.
+    pub fn with_forbidden_spheres(mut self, spheres: impl IntoIterator<Item = String>) -> Self {
+        self.forbidden_spheres = spheres.into_iter().collect();
+        self
+    }
+
+    /// Checks that nothing new is put into a forbidden sphere.
+    fn check_allowed(&self, sphere: &str) -> Result<()> {
+        if self.forbidden_spheres.iter().any(|s| s == sphere) {
+            return Err(Error::SphereForbidden(sphere.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// The spheres a writer gives a new page or note: `spheres` (all of the writer's), or the
+    /// one `sphere` chosen from the writer's.
+    pub(crate) fn new_spheres(
+        &self,
+        sphere: Option<&str>,
+        spheres: Option<&[String]>,
+        writer: &Writer,
+    ) -> Result<Vec<String>> {
+        let chosen = match (sphere, spheres) {
+            (Some(_), Some(_)) => return Err(Error::SphereAndSpheres),
+            (_, Some(spheres)) => self.writers_spheres(spheres, writer)?,
+            (sphere, None) => {
+                if let Some(sphere) = sphere {
+                    self.check_allowed(sphere)?;
+                }
+                vec![writer.spheres.choose(sphere)?.to_owned()]
+            }
+        };
+        for sphere in &chosen {
+            self.check_allowed(sphere)?;
+        }
+        Ok(chosen)
+    }
+
+    /// Checks spheres an agent names: not empty, allowed, and all among the writer's.
+    fn writers_spheres(&self, spheres: &[String], writer: &Writer) -> Result<Vec<String>> {
+        if spheres.is_empty() {
+            return Err(Error::NoSphere);
+        }
+        let mut checked = Vec::new();
+        for sphere in spheres {
+            self.check_allowed(sphere)?;
+            checked.push(writer.spheres.choose(Some(sphere))?.to_owned());
+        }
+        checked.sort();
+        checked.dedup();
+        Ok(checked)
+    }
+
     /// The allowed page types.
     pub fn page_types(&self) -> &[String] {
         &self.page_types
@@ -433,7 +501,11 @@ impl Knowledge {
                 if base_revision.is_some() {
                     return Err(Error::PageNotFound(title));
                 }
-                let sphere = writer.spheres.choose(changes.sphere.as_deref())?;
+                let spheres = self.new_spheres(
+                    changes.sphere.as_deref(),
+                    changes.spheres.as_deref(),
+                    writer,
+                )?;
                 let new_title = match changes.new_title {
                     Some(new_title) => clean_title(&new_title)?,
                     None => title,
@@ -443,18 +515,14 @@ impl Knowledge {
                     page_type: page_type.flatten(),
                     aliases: changes.aliases.unwrap_or_default(),
                     body: body.to_owned(),
+                    spheres,
                 }
                 .normalized(&tx, NO_PAGE, visibility)?;
                 tx.execute(
                     "INSERT INTO page (title, title_key) VALUES (?1, ?2)",
                     params![snapshot.title, title_key(&snapshot.title)],
                 )?;
-                let page_id = tx.last_insert_rowid();
-                tx.execute(
-                    "INSERT INTO page_sphere (page_id, sphere) VALUES (?1, ?2)",
-                    params![page_id, sphere],
-                )?;
-                (page_id, snapshot)
+                (tx.last_insert_rowid(), snapshot)
             }
             Some(page_id) => {
                 let current = current_page(&tx, page_id)?;
@@ -472,11 +540,29 @@ impl Knowledge {
                     }
                     None => current.title.clone(),
                 };
+                let spheres = match changes.spheres {
+                    // The writer's choice replaces the spheres it sees; hidden ones stay.
+                    Some(spheres) => {
+                        let mut spheres = self.writers_spheres(&spheres, writer)?;
+                        spheres.extend(
+                            current
+                                .spheres
+                                .iter()
+                                .filter(|s| !writer.spheres.contains(s))
+                                .cloned(),
+                        );
+                        spheres.sort();
+                        spheres.dedup();
+                        spheres
+                    }
+                    None => current.spheres.clone(),
+                };
                 let snapshot = Snapshot {
                     title: new_title,
                     page_type: page_type.unwrap_or_else(|| current.page_type.clone()),
                     aliases,
                     body: body.to_owned(),
+                    spheres,
                 }
                 .normalized(&tx, page_id, visibility)?;
                 if snapshot.matches(&current) {
@@ -559,7 +645,8 @@ impl Knowledge {
         };
         let revisions = conn
             .prepare(
-                "SELECT number, title, page_type, created_at, author, length(CAST(body AS BLOB)) \
+                "SELECT number, title, page_type, created_at, author, \
+                 length(CAST(body AS BLOB)), spheres \
                  FROM revision WHERE page_id = ?1 ORDER BY number DESC",
             )?
             .query_map([page_id], |row| {
@@ -573,6 +660,7 @@ impl Knowledge {
                         .as_deref()
                         .and_then(Author::parse),
                     body_bytes: row.get::<_, i64>(5)? as usize,
+                    spheres: split_spheres(row.get(6)?),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -726,6 +814,8 @@ struct Snapshot {
     page_type: Option<String>,
     aliases: Vec<String>,
     body: String,
+    /// Sorted.
+    spheres: Vec<String>,
 }
 
 impl Snapshot {
@@ -774,10 +864,11 @@ impl Snapshot {
             && self.page_type == page.page_type
             && self.aliases == page.aliases
             && self.body == page.body
+            && self.spheres == page.spheres
     }
 
-    /// Records this snapshot as the page's next revision and updates its title, type, aliases
-    /// and links accordingly.
+    /// Records this snapshot as the page's next revision and updates its title, type, aliases,
+    /// spheres and links accordingly.
     fn store(&self, tx: &Transaction<'_>, page_id: i64, author: &Author) -> Result<()> {
         let number: u32 = tx.query_row(
             "SELECT coalesce(max(number), 0) + 1 FROM revision WHERE page_id = ?1",
@@ -785,8 +876,8 @@ impl Snapshot {
             |row| row.get(0),
         )?;
         tx.execute(
-            "INSERT INTO revision (page_id, number, title, page_type, aliases, body, author) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO revision (page_id, number, title, page_type, aliases, body, author, \
+             spheres) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 page_id,
                 number,
@@ -794,9 +885,17 @@ impl Snapshot {
                 self.page_type,
                 self.aliases.join("\n"),
                 self.body,
-                author.to_string()
+                author.to_string(),
+                self.spheres.join("\n")
             ],
         )?;
+        tx.execute("DELETE FROM page_sphere WHERE page_id = ?1", [page_id])?;
+        for sphere in &self.spheres {
+            tx.execute(
+                "INSERT INTO page_sphere (page_id, sphere) VALUES (?1, ?2)",
+                params![page_id, sphere],
+            )?;
+        }
         tx.execute(
             "UPDATE page SET title = ?2, title_key = ?3, page_type = ?4 WHERE id = ?1",
             params![page_id, self.title, title_key(&self.title), self.page_type],
@@ -837,13 +936,11 @@ fn increase_change_counter(conn: &Connection) -> Result<()> {
 }
 
 const PAGE_SELECT_WITH_ID: &str = "SELECT p.id, r.title, r.page_type, r.aliases, r.body, \
-     r.number, p.created_at, r.created_at, r.author, \
-     (SELECT group_concat(sphere, char(10)) FROM page_sphere WHERE page_id = p.id) \
+     r.number, p.created_at, r.created_at, r.author, r.spheres \
      FROM page p JOIN revision r ON r.page_id = p.id";
 
 const PAGE_SELECT: &str = "SELECT r.title, r.page_type, r.aliases, r.body, r.number, \
-     p.created_at, r.created_at, r.author, \
-     (SELECT group_concat(sphere, char(10)) FROM page_sphere WHERE page_id = p.id) \
+     p.created_at, r.created_at, r.author, r.spheres \
      FROM page p JOIN revision r ON r.page_id = p.id";
 
 fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
@@ -873,7 +970,7 @@ fn row_to_page_from(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<P
     })
 }
 
-/// Splits a newline-separated `group_concat` of spheres into a sorted list.
+/// Splits newline-separated spheres into a sorted list.
 pub(crate) fn split_spheres(spheres: Option<String>) -> Vec<String> {
     let mut spheres: Vec<String> = spheres
         .unwrap_or_default()

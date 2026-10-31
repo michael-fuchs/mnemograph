@@ -25,6 +25,11 @@ impl Ui {
     }
 
     async fn start_with(graph_max_nodes: usize) -> Self {
+        Self::start_full(graph_max_nodes, &["work"]).await
+    }
+
+    /// A server whose anonymous agent may use these spheres.
+    async fn start_full(graph_max_nodes: usize, spheres: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let knowledge = Knowledge::open(dir.path().join("ui.db")).unwrap();
         let shutdown = CancellationToken::new();
@@ -32,7 +37,7 @@ impl Ui {
             Arc::new(knowledge),
             AppConfig {
                 auth: None,
-                spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
+                spheres: mnemograph_core::Spheres::new(spheres.iter().copied()).unwrap(),
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
@@ -136,6 +141,31 @@ async fn search_page_finds_pages_and_notes() {
 }
 
 #[tokio::test]
+async fn history_shows_the_spheres_of_each_revision_and_marks_changes() {
+    let ui = Ui::start_full(mnemograph::web::DEFAULT_GRAPH_NODES, &["private", "work"]).await;
+    ui.call(
+        "write_page",
+        json!({ "title": "Rust", "body": "A language.", "sphere": "work" }),
+    )
+    .await;
+    ui.call(
+        "write_page",
+        json!({ "title": "Rust", "body": "A language.", "base_revision": 1, "spheres": ["work", "private"] }),
+    )
+    .await;
+
+    let (status, history) = ui.html("/pages/Rust/history").await;
+    assert_eq!(status, 200);
+    assert!(
+        history.contains("<strong title=\"changed in this revision\">private, work</strong>"),
+        "{history}"
+    );
+    assert!(history.contains("<td>work</td>"), "{history}");
+    let (_, first) = ui.html("/pages/Rust/revisions/1").await;
+    assert!(first.contains("spheres: work"), "{first}");
+}
+
+#[tokio::test]
 async fn history_lists_revisions_and_each_can_be_viewed() {
     let ui = Ui::start().await;
     ui.call(
@@ -162,6 +192,7 @@ async fn history_lists_revisions_and_each_can_be_viewed() {
         "old title in revision 1: {history}"
     );
     assert!(history.contains("anonymous"), "{history}");
+    assert!(history.contains("<td>work</td>"), "spheres: {history}");
 
     let (status, old) = ui.html("/pages/Reverse%20proxy/revisions/1").await;
     assert_eq!(status, 200);

@@ -31,7 +31,7 @@ impl Knowledge {
         if body.trim().is_empty() {
             return Err(Error::EmptyNote);
         }
-        let sphere = writer.spheres.choose(sphere)?;
+        let sphere = self.new_spheres(sphere, None, writer)?.remove(0);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(

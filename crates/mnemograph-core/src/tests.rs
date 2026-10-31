@@ -1998,14 +1998,21 @@ fn create_in(knowledge: &Knowledge, sphere: &str, title: &str, body: &str) -> Pa
         .unwrap()
 }
 
-/// Puts a page into one more sphere, which agents cannot do yet.
+/// Puts a page into one more sphere, as a writer seeing all of its spheres; a new revision.
 fn add_sphere(knowledge: &Knowledge, title: &str, sphere: &str) {
+    let page = knowledge.page(title, ALL).unwrap().unwrap();
+    let mut spheres = page.spheres.clone();
+    spheres.push(sphere.to_owned());
+    let writer = Writer {
+        author: author(),
+        spheres: Spheres::new(spheres.clone()).unwrap(),
+    };
+    let changes = PageChanges {
+        spheres: Some(spheres),
+        ..Default::default()
+    };
     knowledge
-        .conn()
-        .execute(
-            "INSERT INTO page_sphere (page_id, sphere) SELECT id, ?2 FROM page WHERE title = ?1",
-            [title, sphere],
-        )
+        .write_page(title, &page.body, Some(page.revision), changes, &writer)
         .unwrap();
 }
 
@@ -2139,7 +2146,7 @@ fn a_page_in_two_spheres_is_visible_and_changeable_through_either() {
     create_in(&knowledge, "work", "Rust", "v1");
     add_sphere(&knowledge, "Rust", "private");
 
-    for (sphere, base) in [("work", 1), ("private", 2)] {
+    for (sphere, base) in [("work", 2), ("private", 3)] {
         let writer = writer_in(&[sphere]);
         let page = knowledge
             .page("Rust", writer.visibility())
@@ -2536,4 +2543,230 @@ fn the_access_log_records_spheres_and_counts_reads_and_gaps_per_sphere() {
         .query_row("SELECT count(*) FROM access_sphere", [], |row| row.get(0))
         .unwrap();
     assert_eq!(left, 0);
+}
+
+fn with_spheres(spheres: &[&str]) -> PageChanges {
+    PageChanges {
+        spheres: Some(spheres.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_sphere_whose_rule_forbids_the_wiki_cannot_be_used() {
+    let knowledge = knowledge().with_forbidden_spheres(["work".to_owned()]);
+    let both = writer_in(&["private", "work"]);
+    let named = |sphere: &str| PageChanges {
+        sphere: Some(sphere.to_owned()),
+        ..Default::default()
+    };
+
+    let refusals = [
+        knowledge
+            .write_page("Payroll", "", None, named("work"), &both)
+            .unwrap_err(),
+        knowledge
+            .write_page(
+                "Payroll",
+                "",
+                None,
+                with_spheres(&["private", "work"]),
+                &both,
+            )
+            .unwrap_err(),
+        knowledge
+            .write_page(
+                "Payroll",
+                "",
+                None,
+                PageChanges::default(),
+                &writer_in(&["work"]),
+            )
+            .unwrap_err(),
+        knowledge
+            .add_note("[[Payroll]]", Some("work"), &both)
+            .unwrap_err(),
+        knowledge
+            .add_note("[[Payroll]]", None, &writer_in(&["work"]))
+            .unwrap_err(),
+    ];
+    for err in refusals {
+        assert!(
+            matches!(&err, Error::SphereForbidden(s) if s == "work"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("must not enter the wiki"), "{err}");
+    }
+    assert_eq!(knowledge.page("Payroll", ALL).unwrap(), None);
+    assert!(knowledge.notes().unwrap().is_empty());
+
+    // A page cannot be moved into it either.
+    let page = knowledge
+        .write_page("Rust", "", None, named("private"), &both)
+        .unwrap();
+    let err = knowledge
+        .write_page(
+            "Rust",
+            "",
+            Some(page.revision),
+            with_spheres(&["work"]),
+            &both,
+        )
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereForbidden(_)), "{err}");
+}
+
+#[test]
+fn changing_a_pages_spheres_keeps_those_the_writer_cannot_see() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "A language.");
+    add_sphere(&knowledge, "Rust", "private");
+    let work_and_clubs = writer_in(&["clubs", "work"]);
+
+    let moved = knowledge
+        .write_page(
+            "Rust",
+            "A language.",
+            Some(2),
+            with_spheres(&["clubs"]),
+            &work_and_clubs,
+        )
+        .unwrap();
+    assert_eq!(moved.spheres, ["clubs", "private"]);
+    assert_eq!(moved.revision, 3);
+
+    let shared = knowledge
+        .write_page(
+            "Rust",
+            "A language.",
+            Some(3),
+            with_spheres(&["work", "clubs", "work"]),
+            &work_and_clubs,
+        )
+        .unwrap();
+    assert_eq!(shared.spheres, ["clubs", "private", "work"]);
+    // Omitted spheres stay as they are.
+    let unchanged = knowledge
+        .write_page(
+            "Rust",
+            "Still a language.",
+            Some(4),
+            PageChanges::default(),
+            &work_and_clubs,
+        )
+        .unwrap();
+    assert_eq!(unchanged.spheres, ["clubs", "private", "work"]);
+}
+
+#[test]
+fn an_empty_or_foreign_set_of_spheres_is_refused() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "");
+    let work = writer_in(&["work"]);
+    let err = knowledge
+        .write_page("Rust", "", Some(1), with_spheres(&[]), &work)
+        .unwrap_err();
+    assert!(matches!(err, Error::NoSphere), "{err}");
+    let err = knowledge
+        .write_page("Rust", "", Some(1), with_spheres(&["private"]), &work)
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereNotAllowed { .. }), "{err}");
+    let err = knowledge
+        .write_page("Ferris", "", None, with_spheres(&[]), &work)
+        .unwrap_err();
+    assert!(matches!(err, Error::NoSphere), "{err}");
+    let err = knowledge
+        .write_page(
+            "Ferris",
+            "",
+            None,
+            PageChanges {
+                sphere: Some("work".into()),
+                spheres: Some(vec!["work".into()]),
+                ..Default::default()
+            },
+            &work,
+        )
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereAndSpheres), "{err}");
+    assert_eq!(knowledge.page("Rust", ALL).unwrap().unwrap().revision, 1);
+
+    // A new page may get several of the writer's spheres at once.
+    let page = knowledge
+        .write_page(
+            "Ferris",
+            "",
+            None,
+            with_spheres(&["work", "private"]),
+            &writer_in(&["private", "work"]),
+        )
+        .unwrap();
+    assert_eq!(page.spheres, ["private", "work"]);
+}
+
+#[test]
+fn revisions_record_the_spheres_and_a_change_of_spheres_alone_is_a_revision() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "A language.");
+    let both = writer_in(&["private", "work"]);
+    knowledge
+        .write_page(
+            "Rust",
+            "A language.",
+            Some(1),
+            with_spheres(&["private", "work"]),
+            &both,
+        )
+        .unwrap();
+    // The same spheres again change nothing.
+    let same = knowledge
+        .write_page(
+            "Rust",
+            "A language.",
+            Some(2),
+            with_spheres(&["work", "private"]),
+            &both,
+        )
+        .unwrap();
+    assert_eq!(same.revision, 2);
+
+    let history: Vec<(u32, Vec<String>)> = knowledge
+        .revisions("Rust")
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.number, r.spheres))
+        .collect();
+    assert_eq!(
+        history,
+        [
+            (2, vec!["private".to_owned(), "work".to_owned()]),
+            (1, vec!["work".to_owned()])
+        ]
+    );
+    assert_eq!(
+        knowledge.page_revision("Rust", 1).unwrap().unwrap().spheres,
+        ["work"]
+    );
+}
+
+#[test]
+fn the_upgrade_gives_existing_revisions_their_pages_spheres() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_version(
+        &dir,
+        11,
+        "INSERT INTO page (id, title, title_key) VALUES (1, 'Old', 'old');
+         INSERT INTO revision (page_id, number, title, body) VALUES (1, 1, 'Old', 'v1');
+         INSERT INTO revision (page_id, number, title, body) VALUES (1, 2, 'Old', 'v2');
+         INSERT INTO page_sphere (page_id, sphere) VALUES (1, 'work'), (1, 'private');",
+    );
+    let knowledge = Knowledge::open(&path).unwrap();
+    for revision in knowledge.revisions("Old").unwrap().unwrap() {
+        assert_eq!(revision.spheres, ["private", "work"], "{}", revision.number);
+    }
+    assert_eq!(
+        knowledge.page("Old", ALL).unwrap().unwrap().spheres,
+        ["private", "work"]
+    );
 }
