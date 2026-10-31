@@ -6,18 +6,35 @@ fn author() -> Author {
     Author::Agent("test-agent".into())
 }
 
+/// The sphere tests write into unless they are about spheres.
+const SPHERE: &str = "test";
+
+/// The owner's view: everything.
+const ALL: Visibility<'static> = Visibility::All;
+
+fn writer() -> Writer {
+    writer_as(&author())
+}
+
+fn writer_as(author: &Author) -> Writer {
+    Writer {
+        author: author.clone(),
+        spheres: Spheres::new([SPHERE]).unwrap(),
+    }
+}
+
 fn knowledge() -> Knowledge {
     Knowledge::open_in_memory().unwrap()
 }
 
 fn create(knowledge: &Knowledge, title: &str, body: &str) -> Page {
     knowledge
-        .write_page(title, body, None, PageChanges::default(), &author())
+        .write_page(title, body, None, PageChanges::default(), &writer())
         .unwrap()
 }
 
 fn update(knowledge: &Knowledge, title: &str, body: &str, base: u32) -> Result<Page> {
-    knowledge.write_page(title, body, Some(base), PageChanges::default(), &author())
+    knowledge.write_page(title, body, Some(base), PageChanges::default(), &writer())
 }
 
 fn link(title: &str, page: Option<&str>) -> LinkTarget {
@@ -30,7 +47,9 @@ fn link(title: &str, page: Option<&str>) -> LinkTarget {
 /// Creates a database at schema `version`, lets `fill` add rows, and returns its path.
 fn database_at_version(dir: &tempfile::TempDir, version: usize, fill: &str) -> std::path::PathBuf {
     let mut conn = Connection::open_in_memory().unwrap();
-    schema::migrations().to_version(&mut conn, version).unwrap();
+    schema::migrations(None)
+        .to_version(&mut conn, version)
+        .unwrap();
     conn.execute_batch(fill).unwrap();
     let path = dir.path().join(format!("v{version}.db"));
     conn.backup(rusqlite::MAIN_DB, &path, None).unwrap();
@@ -45,12 +64,12 @@ fn created_page_can_be_read_back() {
     let created = create(&knowledge, "Rauthy", "An OIDC provider.");
     assert_eq!(created.title, "Rauthy");
     assert_eq!(created.revision, 1);
-    assert_eq!(knowledge.page("Rauthy").unwrap().unwrap(), created);
+    assert_eq!(knowledge.page("Rauthy", ALL).unwrap().unwrap(), created);
 }
 
 #[test]
 fn missing_page_is_none() {
-    assert_eq!(knowledge().page("Nothing").unwrap(), None);
+    assert_eq!(knowledge().page("Nothing", ALL).unwrap(), None);
 }
 
 #[test]
@@ -58,7 +77,7 @@ fn titles_breaking_link_syntax_are_rejected() {
     let knowledge = knowledge();
     for title in ["", "   ", "a|b", "[[x]]", "two\nlines"] {
         let err = knowledge
-            .write_page(title, "", None, PageChanges::default(), &author())
+            .write_page(title, "", None, PageChanges::default(), &writer())
             .unwrap_err();
         assert!(matches!(err, Error::InvalidTitle(_)), "{title:?}");
     }
@@ -70,7 +89,7 @@ fn update_with_current_base_creates_a_new_revision_and_keeps_the_old_one() {
     create(&knowledge, "Caddy", "v1");
     let updated = update(&knowledge, "Caddy", "v2", 1).unwrap();
     assert_eq!((updated.revision, updated.body.as_str()), (2, "v2"));
-    assert_eq!(knowledge.page("Caddy").unwrap().unwrap(), updated);
+    assert_eq!(knowledge.page("Caddy", ALL).unwrap().unwrap(), updated);
 
     let first = knowledge.page_revision("Caddy", 1).unwrap().unwrap();
     assert_eq!(first.body, "v1");
@@ -82,7 +101,7 @@ fn update_without_base_is_a_conflict() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "first");
     let err = knowledge
-        .write_page("Rust", "second", None, PageChanges::default(), &author())
+        .write_page("Rust", "second", None, PageChanges::default(), &writer())
         .unwrap_err();
     let Error::Conflict { base, current } = err else {
         panic!("expected a conflict, got {err:?}");
@@ -106,7 +125,7 @@ fn update_with_stale_base_is_a_conflict_and_changes_nothing() {
         (current.revision, current.body.as_str()),
         (2, "v2 by agent A")
     );
-    assert_eq!(knowledge.page("Rust").unwrap().unwrap().revision, 2);
+    assert_eq!(knowledge.page("Rust", ALL).unwrap().unwrap().revision, 2);
 }
 
 #[test]
@@ -133,7 +152,7 @@ fn data_survives_reopening() {
     );
     let reopened = Knowledge::open(&path).unwrap();
     assert_eq!(
-        reopened.page("Caddy").unwrap().unwrap().body,
+        reopened.page("Caddy", ALL).unwrap().unwrap().body,
         "A reverse proxy."
     );
 }
@@ -144,7 +163,7 @@ fn data_survives_reopening() {
 fn titles_are_found_regardless_of_case_and_whitespace() {
     let knowledge = knowledge();
     create(&knowledge, "  Rauthy   IdP ", "");
-    let page = knowledge.page("rauthy idp").unwrap().unwrap();
+    let page = knowledge.page("rauthy idp", ALL).unwrap().unwrap();
     assert_eq!(page.title, "Rauthy IdP");
 }
 
@@ -153,7 +172,7 @@ fn creating_a_title_differing_only_in_case_is_a_conflict() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "");
     let err = knowledge
-        .write_page("rust", "", None, PageChanges::default(), &author())
+        .write_page("rust", "", None, PageChanges::default(), &writer())
         .unwrap_err();
     assert!(matches!(err, Error::Conflict { current, .. } if current.title == "Rust"));
 }
@@ -170,11 +189,14 @@ fn aliases_lead_to_the_page() {
                 aliases: Some(vec!["Rust (language)".into(), "rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(page.aliases, ["Rust (language)", "rustlang"]);
-    assert_eq!(knowledge.page("RUSTLANG").unwrap().unwrap().title, "Rust");
+    assert_eq!(
+        knowledge.page("RUSTLANG", ALL).unwrap().unwrap().title,
+        "Rust"
+    );
 }
 
 #[test]
@@ -189,7 +211,7 @@ fn aliases_are_cleaned_deduplicated_and_never_equal_the_title() {
                 aliases: Some(vec![" rustlang ".into(), "RustLang".into(), "rust".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(page.aliases, ["rustlang"]);
@@ -209,7 +231,7 @@ fn a_name_of_another_page_cannot_become_an_alias() {
                 aliases: Some(vec!["caddy".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap_err();
     assert!(matches!(err, Error::NameTaken { name, page } if name == "caddy" && page == "Caddy"));
@@ -227,7 +249,7 @@ fn new_page_cannot_take_an_alias_of_another_page() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let err = knowledge
@@ -239,11 +261,11 @@ fn new_page_cannot_take_an_alias_of_another_page() {
                 aliases: Some(vec!["Rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap_err();
     assert!(matches!(err, Error::NameTaken { page, .. } if page == "Rust"));
-    assert_eq!(knowledge.page("Ferris").unwrap(), None);
+    assert_eq!(knowledge.page("Ferris", ALL).unwrap(), None);
 }
 
 #[test]
@@ -261,7 +283,7 @@ fn rename_keeps_the_old_title_as_alias_and_links_keep_resolving() {
                 new_title: Some("Rauthy IdP".into()),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(renamed.title, "Rauthy IdP");
@@ -269,7 +291,7 @@ fn rename_keeps_the_old_title_as_alias_and_links_keep_resolving() {
     assert_eq!(renamed.revision, 2);
 
     assert_eq!(
-        knowledge.page("Rauthy").unwrap().unwrap().title,
+        knowledge.page("Rauthy", ALL).unwrap().unwrap().title,
         "Rauthy IdP"
     );
     assert_eq!(
@@ -299,7 +321,7 @@ fn renaming_to_an_own_alias_swaps_title_and_alias() {
                 aliases: Some(vec!["Rust (language)".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let renamed = knowledge
@@ -311,7 +333,7 @@ fn renaming_to_an_own_alias_swaps_title_and_alias() {
                 new_title: Some("Rust (language)".into()),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(renamed.title, "Rust (language)");
@@ -331,7 +353,7 @@ fn case_only_rename_adds_no_alias() {
                 new_title: Some("Rust".into()),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!((renamed.title.as_str(), renamed.aliases.len()), ("Rust", 0));
@@ -351,7 +373,7 @@ fn renaming_onto_another_page_is_rejected() {
                 new_title: Some("CADDY".into()),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap_err();
     assert!(matches!(err, Error::NameTaken { page, .. } if page == "Caddy"));
@@ -370,7 +392,7 @@ fn omitted_aliases_and_type_are_kept() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let page = update(&knowledge, "Rust", "v2", 1).unwrap();
@@ -392,7 +414,7 @@ fn page_type_is_stored_normalized() {
                 page_type: Some(Some(" Technology ".into())),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(page.page_type.as_deref(), Some("technology"));
@@ -409,7 +431,7 @@ fn unknown_page_type_is_rejected_with_the_allowed_types() {
                 page_type: Some(Some("crate".into())),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap_err();
     let message = err.to_string();
@@ -428,10 +450,10 @@ fn configured_page_types_replace_the_defaults() {
         ..Default::default()
     };
     knowledge
-        .write_page("serde", "", None, changes("library"), &author())
+        .write_page("serde", "", None, changes("library"), &writer())
         .unwrap();
     assert!(matches!(
-        knowledge.write_page("Rust", "", None, changes("technology"), &author()),
+        knowledge.write_page("Rust", "", None, changes("technology"), &writer()),
         Err(Error::UnknownPageType { .. })
     ));
 }
@@ -448,7 +470,7 @@ fn page_type_can_be_removed_and_change_creates_a_revision() {
                 page_type: Some(Some("tool".into())),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let page = knowledge
@@ -460,7 +482,7 @@ fn page_type_can_be_removed_and_change_creates_a_revision() {
                 page_type: Some(None),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!((page.page_type, page.revision), (None, 2));
@@ -517,7 +539,7 @@ fn backlinks_include_links_to_aliases() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     create(&knowledge, "A", "[[Rust]]");
@@ -554,7 +576,7 @@ fn links_to_the_page_itself_or_its_aliases_are_ignored() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert_eq!(knowledge.links("Rust").unwrap(), Links::default());
@@ -570,9 +592,9 @@ fn migration_turns_existing_pages_into_first_revisions() {
         1,
         "INSERT INTO page (title, body) VALUES ('Old', 'from v1 schema');",
     );
-    let page = Knowledge::open(&path)
+    let page = Knowledge::open_with_default_sphere(&path, Some(SPHERE))
         .unwrap()
-        .page("Old")
+        .page("Old", ALL)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -591,8 +613,8 @@ fn migration_fills_title_keys_and_extracts_links_of_current_revisions() {
          INSERT INTO revision (page_id, number, body) VALUES
              (1, 1, '[[Gone]]'), (1, 2, '[[rust]] and [[Stub]]'), (2, 1, '');",
     );
-    let knowledge = Knowledge::open(&path).unwrap();
-    assert_eq!(knowledge.page("OLD").unwrap().unwrap().title, "Old");
+    let knowledge = Knowledge::open_with_default_sphere(&path, Some(SPHERE)).unwrap();
+    assert_eq!(knowledge.page("OLD", ALL).unwrap().unwrap().title, "Old");
     assert_eq!(
         knowledge.links("Old").unwrap().outgoing,
         [link("rust", Some("Rust")), link("Stub", None)]
@@ -621,7 +643,8 @@ fn note_links_attach_it_to_pages_and_stubs() {
     let note = knowledge
         .add_note(
             "Decided [[reverse proxy|the proxy]] is [[Caddy]] because of automatic HTTPS.",
-            &author(),
+            None,
+            &writer(),
         )
         .unwrap();
     assert!(note.created_at.ends_with('Z'));
@@ -652,17 +675,17 @@ fn notes_about_a_page_include_links_to_its_aliases_newest_first() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let first = knowledge
-        .add_note("[[Rust]] 1.99 is out.", &author())
+        .add_note("[[Rust]] 1.99 is out.", None, &writer())
         .unwrap();
     knowledge
-        .add_note("Unrelated [[Caddy]] note.", &author())
+        .add_note("Unrelated [[Caddy]] note.", None, &writer())
         .unwrap();
     let second = knowledge
-        .add_note("[[rustlang]] and [[Rust]] again.", &author())
+        .add_note("[[rustlang]] and [[Rust]] again.", None, &writer())
         .unwrap();
 
     let notes = knowledge.notes_about("Rust", 10).unwrap();
@@ -677,7 +700,7 @@ fn notes_about_a_page_include_links_to_its_aliases_newest_first() {
 fn notes_attached_to_a_stub_stay_attached_when_it_becomes_a_page() {
     let knowledge = knowledge();
     let note = knowledge
-        .add_note("Look into [[Tantivy]].", &author())
+        .add_note("Look into [[Tantivy]].", None, &writer())
         .unwrap();
     create(&knowledge, "Tantivy", "A search library.");
     let notes = knowledge.notes_about("Tantivy", 10).unwrap();
@@ -690,13 +713,13 @@ fn notes_without_links_are_allowed_but_empty_notes_are_not() {
     let knowledge = knowledge();
     assert!(
         knowledge
-            .add_note("Just a thought.", &author())
+            .add_note("Just a thought.", None, &writer())
             .unwrap()
             .links
             .is_empty()
     );
     assert!(matches!(
-        knowledge.add_note("  \n ", &author()),
+        knowledge.add_note("  \n ", None, &writer()),
         Err(Error::EmptyNote)
     ));
 }
@@ -705,7 +728,7 @@ fn notes_without_links_are_allowed_but_empty_notes_are_not() {
 fn notes_are_not_backlinks() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "");
-    knowledge.add_note("[[Rust]]", &author()).unwrap();
+    knowledge.add_note("[[Rust]]", None, &writer()).unwrap();
     assert!(knowledge.links("Rust").unwrap().backlinks.is_empty());
 }
 
@@ -776,7 +799,7 @@ fn related_resolves_aliases_and_includes_stubs() {
                 page_type: Some(Some("technology".into())),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     create(&knowledge, "mnemograph", "[[rustlang]] and [[Tantivy]]");
@@ -892,7 +915,7 @@ fn the_neighborhood_resolves_aliases_and_starts_from_stubs() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     create(&knowledge, "mnemograph", "[[rustlang]] and [[Tantivy]]");
@@ -947,7 +970,7 @@ fn typed(knowledge: &Knowledge, title: &str, page_type: &str, body: &str) {
                 page_type: Some(Some(page_type.into())),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
 }
@@ -964,7 +987,7 @@ fn the_wiki_graph_has_every_page_and_stub_most_linked_first() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     // Links under the title and an alias, in both directions, count as one.
@@ -1081,13 +1104,14 @@ fn search_finds_titles_aliases_and_notes() {
                 aliases: Some(vec!["IdP".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     let note = knowledge
         .add_note(
             "Decided on [[Caddy]] because of automatic certificates.",
-            &author(),
+            None,
+            &writer(),
         )
         .unwrap();
 
@@ -1115,7 +1139,7 @@ fn search_reflects_the_current_revision_and_renames() {
                 new_title: Some("Reverse proxy".into()),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     assert!(search(&knowledge, "traefik").is_empty());
@@ -1135,13 +1159,13 @@ fn search_filters_by_page_type_and_rejects_unknown_types() {
                     page_type: Some(Some(page_type.into())),
                     ..Default::default()
                 },
-                &author(),
+                &writer(),
             )
             .unwrap();
     };
     typed("Rust", "technology");
     typed("Use Rust", "decision");
-    knowledge.add_note("Rust note", &author()).unwrap();
+    knowledge.add_note("Rust note", None, &writer()).unwrap();
 
     let hits = knowledge.search("rust", Some("Decision"), 10).unwrap();
     assert_eq!(found_titles(&hits), ["Use Rust"]);
@@ -1195,7 +1219,7 @@ fn rebuild_search_index_restores_all_content() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "A language.");
     knowledge
-        .add_note("A note about [[Rust]].", &author())
+        .add_note("A note about [[Rust]].", None, &writer())
         .unwrap();
     knowledge.rebuild_search_index().unwrap();
     assert_eq!(search(&knowledge, "rust").len(), 2);
@@ -1234,15 +1258,15 @@ fn export_writes_pages_as_markdown_and_notes_as_jsonl() {
                 aliases: Some(vec!["Rauthy".into(), "Say \"hi\"".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     create(&knowledge, "C++", "no type, no aliases");
     create(&knowledge, "C#", "collides with C++");
     knowledge
-        .add_note("Decided on [[Rauthy]].", &author())
+        .add_note("Decided on [[Rauthy]].", None, &writer())
         .unwrap();
-    knowledge.add_note("Second\nline", &author()).unwrap();
+    knowledge.add_note("Second\nline", None, &writer()).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("export");
@@ -1251,7 +1275,7 @@ fn export_writes_pages_as_markdown_and_notes_as_jsonl() {
 
     let rauthy = std::fs::read_to_string(target.join("pages/Rauthy-IdP.md")).unwrap();
     assert!(rauthy.starts_with(
-        "---\ntitle: \"Rauthy (IdP)\"\ntype: \"tool\"\naliases: [\"Rauthy\",\"Say \\\"hi\\\"\"]\nrevision: 1\n"
+        "---\ntitle: \"Rauthy (IdP)\"\ntype: \"tool\"\naliases: [\"Rauthy\",\"Say \\\"hi\\\"\"]\nspheres: [\"test\"]\nrevision: 1\n"
     ), "{rauthy}");
     assert!(
         rauthy.ends_with("---\n\nAn OIDC provider.\n\nSee [[Rust]].\n"),
@@ -1259,7 +1283,10 @@ fn export_writes_pages_as_markdown_and_notes_as_jsonl() {
     );
 
     let c = std::fs::read_to_string(target.join("pages/C.md")).unwrap();
-    assert!(c.starts_with("---\ntitle: \"C++\"\nrevision: 1\n"), "{c}");
+    assert!(
+        c.starts_with("---\ntitle: \"C++\"\nspheres: [\"test\"]\nrevision: 1\n"),
+        "{c}"
+    );
     assert!(target.join("pages/C-2.md").exists());
 
     let notes = std::fs::read_to_string(target.join("notes.jsonl")).unwrap();
@@ -1270,6 +1297,7 @@ fn export_writes_pages_as_markdown_and_notes_as_jsonl() {
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["body"], "Decided on [[Rauthy]].");
     assert_eq!(lines[0]["links"], serde_json::json!(["Rauthy"]));
+    assert_eq!(lines[0]["spheres"], serde_json::json!(["test"]));
     assert_eq!(lines[1]["body"], "Second\nline");
     assert!(lines[1]["created_at"].as_str().unwrap().ends_with('Z'));
 }
@@ -1300,13 +1328,13 @@ fn deleting_a_page_removes_it_and_its_title_becomes_a_stub() {
                 aliases: Some(vec!["traefik proxy".into()]),
                 ..Default::default()
             },
-            &author(),
+            &writer(),
         )
         .unwrap();
     update(&knowledge, "Traefik", "Second revision.", 1).unwrap();
     create(&knowledge, "Proxies", "[[Traefik]] or [[Traefik proxy]]");
     let note = knowledge
-        .add_note("Evaluated [[Traefik]].", &author())
+        .add_note("Evaluated [[Traefik]].", None, &writer())
         .unwrap();
 
     let deleted = knowledge.delete_page("traefik proxy").unwrap();
@@ -1319,7 +1347,7 @@ fn deleting_a_page_removes_it_and_its_title_becomes_a_stub() {
         }
     );
 
-    assert_eq!(knowledge.page("Traefik").unwrap(), None);
+    assert_eq!(knowledge.page("Traefik", ALL).unwrap(), None);
     assert_eq!(knowledge.page_revision("Traefik", 1).unwrap(), None);
     assert!(
         knowledge
@@ -1349,10 +1377,10 @@ fn deleting_a_note_removes_only_that_note() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "");
     let first = knowledge
-        .add_note("First about [[Rust]], unusualword.", &author())
+        .add_note("First about [[Rust]], unusualword.", None, &writer())
         .unwrap();
     let second = knowledge
-        .add_note("Second about [[Rust]].", &author())
+        .add_note("Second about [[Rust]].", None, &writer())
         .unwrap();
 
     knowledge.delete_note(first.id).unwrap();
@@ -1364,7 +1392,7 @@ fn deleting_a_note_removes_only_that_note() {
         .collect();
     assert_eq!(remaining, [second.id]);
     assert!(search(&knowledge, "unusualword").is_empty());
-    assert!(knowledge.page("Rust").unwrap().is_some());
+    assert!(knowledge.page("Rust", ALL).unwrap().is_some());
 }
 
 #[test]
@@ -1400,14 +1428,31 @@ fn every_revision_and_note_records_its_author() {
     let claude = Author::Agent("claude-code".into());
     let owner = Author::Owner("user-1".into());
     knowledge
-        .write_page("Rust", "v1", None, PageChanges::default(), &claude)
+        .write_page(
+            "Rust",
+            "v1",
+            None,
+            PageChanges::default(),
+            &writer_as(&claude),
+        )
         .unwrap();
     knowledge
-        .write_page("Rust", "v2", Some(1), PageChanges::default(), &owner)
+        .write_page(
+            "Rust",
+            "v2",
+            Some(1),
+            PageChanges::default(),
+            &writer_as(&owner),
+        )
         .unwrap();
-    let note = knowledge.add_note("About [[Rust]].", &claude).unwrap();
+    let note = knowledge
+        .add_note("About [[Rust]].", None, &writer_as(&claude))
+        .unwrap();
 
-    assert_eq!(knowledge.page("Rust").unwrap().unwrap().author, Some(owner));
+    assert_eq!(
+        knowledge.page("Rust", ALL).unwrap().unwrap().author,
+        Some(owner)
+    );
     assert_eq!(
         knowledge.page_revision("Rust", 1).unwrap().unwrap().author,
         Some(claude.clone())
@@ -1429,8 +1474,8 @@ fn rows_from_before_authors_have_none() {
          INSERT INTO revision (page_id, number, title, body) VALUES (1, 1, 'Old', '');
          INSERT INTO note (body) VALUES ('old note');",
     );
-    let knowledge = Knowledge::open(&path).unwrap();
-    assert_eq!(knowledge.page("Old").unwrap().unwrap().author, None);
+    let knowledge = Knowledge::open_with_default_sphere(&path, Some(SPHERE)).unwrap();
+    assert_eq!(knowledge.page("Old", ALL).unwrap().unwrap().author, None);
     assert_eq!(knowledge.notes().unwrap()[0].author, None);
 }
 
@@ -1438,7 +1483,7 @@ fn rows_from_before_authors_have_none() {
 fn export_includes_authors() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "");
-    knowledge.add_note("note", &author()).unwrap();
+    knowledge.add_note("note", None, &writer()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     knowledge.export(&dir.path().join("out")).unwrap();
     let page = std::fs::read_to_string(dir.path().join("out/pages/Rust.md")).unwrap();
@@ -1505,7 +1550,13 @@ fn revisions_list_the_history_newest_first_with_authors() {
     let claude = Author::Agent("claude-code".into());
     let owner = Author::Owner("user-1".into());
     knowledge
-        .write_page("Proxy", "Traefik", None, PageChanges::default(), &claude)
+        .write_page(
+            "Proxy",
+            "Traefik",
+            None,
+            PageChanges::default(),
+            &writer_as(&claude),
+        )
         .unwrap();
     knowledge
         .write_page(
@@ -1517,7 +1568,7 @@ fn revisions_list_the_history_newest_first_with_authors() {
                 page_type: Some(Some("decision".into())),
                 ..Default::default()
             },
-            &owner,
+            &writer_as(&owner),
         )
         .unwrap();
 
@@ -1566,7 +1617,7 @@ fn totals_count_pages_stubs_links_notes_and_revisions() {
     )
     .unwrap();
     knowledge
-        .add_note("[[Rust]] and [[Caddy]]", &author())
+        .add_note("[[Rust]] and [[Caddy]]", None, &writer())
         .unwrap();
 
     assert_eq!(
@@ -1595,7 +1646,7 @@ fn weekly_growth_counts_pages_and_notes_up_to_each_week() {
 
     create(&knowledge, "A", "");
     create(&knowledge, "B", "");
-    let note = knowledge.add_note("first", &author()).unwrap();
+    let note = knowledge.add_note("first", None, &writer()).unwrap();
     // Thursday 2026-10-08 and Sunday 2026-10-11 are in the week of Monday 2026-10-05; Monday
     // 2026-10-19 starts its own week. The week of 10-12 has nothing new.
     created_at(&knowledge, "page", "A", "2026-10-08T10:00:00.000Z");
@@ -1640,7 +1691,7 @@ fn most_linked_and_orphaned_pages() {
     create(&knowledge, "B", "");
     create(&knowledge, "zeta", "");
     create(&knowledge, "Alone", "[[Alone]]");
-    knowledge.add_note("[[zeta]]", &author()).unwrap();
+    knowledge.add_note("[[zeta]]", None, &writer()).unwrap();
 
     let most: Vec<_> = knowledge
         .most_linked_pages(2)
@@ -1671,7 +1722,13 @@ fn activity_per_author_counts_revisions_and_notes() {
     let claude = Author::Agent("claude-code".into());
     let vibe = Author::Agent("vibe".into());
     let page = knowledge
-        .write_page("A", "one", None, PageChanges::default(), &claude)
+        .write_page(
+            "A",
+            "one",
+            None,
+            PageChanges::default(),
+            &writer_as(&claude),
+        )
         .unwrap();
     knowledge
         .write_page(
@@ -1679,11 +1736,15 @@ fn activity_per_author_counts_revisions_and_notes() {
             "two",
             Some(page.revision),
             PageChanges::default(),
-            &claude,
+            &writer_as(&claude),
         )
         .unwrap();
-    knowledge.add_note("from claude", &claude).unwrap();
-    knowledge.add_note("from vibe", &vibe).unwrap();
+    knowledge
+        .add_note("from claude", None, &writer_as(&claude))
+        .unwrap();
+    knowledge
+        .add_note("from vibe", None, &writer_as(&vibe))
+        .unwrap();
     {
         let conn = knowledge.conn();
         // Claude's first revision two weeks earlier; one row from before authors were recorded.
@@ -1709,7 +1770,9 @@ fn activity_per_author_counts_revisions_and_notes() {
         )
         .unwrap();
     }
-    knowledge.add_note("vibe again", &vibe).unwrap();
+    knowledge
+        .add_note("vibe again", None, &writer_as(&vibe))
+        .unwrap();
     knowledge
         .conn()
         .execute(
@@ -1782,7 +1845,7 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
                 aliases: Some(vec!["rustlang".into()]),
                 ..Default::default()
             },
-            &claude,
+            &writer_as(&claude),
         )
         .unwrap();
     create(&knowledge, "Gone", "");
@@ -1876,4 +1939,262 @@ fn old_access_log_entries_are_pruned() {
     let gaps = knowledge.knowledge_gaps(10).unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].terms, "new");
+}
+
+// Spheres
+
+fn spheres(names: &[&str]) -> Spheres {
+    Spheres::new(names.iter().copied()).unwrap()
+}
+
+fn writer_in(names: &[&str]) -> Writer {
+    Writer {
+        author: author(),
+        spheres: spheres(names),
+    }
+}
+
+fn create_in(knowledge: &Knowledge, sphere: &str, title: &str, body: &str) -> Page {
+    knowledge
+        .write_page(
+            title,
+            body,
+            None,
+            PageChanges::default(),
+            &writer_in(&[sphere]),
+        )
+        .unwrap()
+}
+
+/// Puts a page into one more sphere, which agents cannot do yet.
+fn add_sphere(knowledge: &Knowledge, title: &str, sphere: &str) {
+    knowledge
+        .conn()
+        .execute(
+            "INSERT INTO page_sphere (page_id, sphere) SELECT id, ?2 FROM page WHERE title = ?1",
+            [title, sphere],
+        )
+        .unwrap();
+}
+
+#[test]
+fn new_pages_and_notes_get_the_writers_sphere() {
+    let knowledge = knowledge();
+    let page = create_in(&knowledge, "work", "Rust", "");
+    assert_eq!(page.spheres, ["work"]);
+    let note = knowledge
+        .add_note("About [[Rust]].", None, &writer_in(&["work"]))
+        .unwrap();
+    assert_eq!(note.spheres, ["work"]);
+    assert_eq!(knowledge.notes().unwrap()[0].spheres, ["work"]);
+}
+
+#[test]
+fn a_page_of_another_sphere_cannot_be_read() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "private", "Holidays", "Secret plans.");
+    let work = spheres(&["work"]);
+    assert_eq!(
+        knowledge
+            .page("holidays", Visibility::Within(&work))
+            .unwrap(),
+        None
+    );
+    let private = spheres(&["private"]);
+    assert!(
+        knowledge
+            .page("Holidays", Visibility::Within(&private))
+            .unwrap()
+            .is_some()
+    );
+    assert!(knowledge.page("Holidays", ALL).unwrap().is_some());
+}
+
+#[test]
+fn a_page_of_another_sphere_cannot_be_changed_and_is_not_revealed() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "private", "Holidays", "Secret plans.");
+    let work = writer_in(&["work"]);
+
+    let err = knowledge
+        .write_page("Holidays", "mine", Some(1), PageChanges::default(), &work)
+        .unwrap_err();
+    assert!(matches!(err, Error::PageNotFound(_)), "{err}");
+
+    // Creating it would be a conflict that shows the page; the title is just unavailable.
+    let err = knowledge
+        .write_page("holidays", "mine", None, PageChanges::default(), &work)
+        .unwrap_err();
+    assert!(matches!(err, Error::TitleUnavailable(_)), "{err}");
+    assert!(!err.to_string().contains("Secret"), "{err}");
+
+    assert_eq!(
+        knowledge.page("Holidays", ALL).unwrap().unwrap().revision,
+        1
+    );
+}
+
+#[test]
+fn names_of_hidden_pages_cannot_be_taken_and_are_not_named() {
+    let knowledge = knowledge();
+    knowledge
+        .write_page(
+            "Holidays",
+            "",
+            None,
+            PageChanges {
+                aliases: Some(vec!["Vacation 2027".into()]),
+                ..Default::default()
+            },
+            &writer_in(&["private"]),
+        )
+        .unwrap();
+    create_in(&knowledge, "work", "Plans", "");
+    let work = writer_in(&["work"]);
+
+    let as_alias = knowledge
+        .write_page(
+            "Plans",
+            "",
+            Some(1),
+            PageChanges {
+                aliases: Some(vec!["Holidays".into()]),
+                ..Default::default()
+            },
+            &work,
+        )
+        .unwrap_err();
+    let as_new_title = knowledge
+        .write_page(
+            "Plans",
+            "",
+            Some(1),
+            PageChanges {
+                new_title: Some("vacation 2027".into()),
+                ..Default::default()
+            },
+            &work,
+        )
+        .unwrap_err();
+    let new_page_alias = knowledge
+        .write_page(
+            "Trips",
+            "",
+            None,
+            PageChanges {
+                aliases: Some(vec!["Vacation 2027".into()]),
+                ..Default::default()
+            },
+            &work,
+        )
+        .unwrap_err();
+    // Each error names only what the writer gave, never the hidden page's title.
+    for (err, given) in [
+        (as_alias, "Holidays"),
+        (as_new_title, "vacation 2027"),
+        (new_page_alias, "Vacation 2027"),
+    ] {
+        assert!(
+            matches!(&err, Error::TitleUnavailable(name) if name == given),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_page_in_two_spheres_is_visible_and_changeable_through_either() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "v1");
+    add_sphere(&knowledge, "Rust", "private");
+
+    for (sphere, base) in [("work", 1), ("private", 2)] {
+        let writer = writer_in(&[sphere]);
+        let page = knowledge
+            .page("Rust", writer.visibility())
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.spheres, ["private", "work"]);
+        let changed = knowledge
+            .write_page("Rust", sphere, Some(base), PageChanges::default(), &writer)
+            .unwrap();
+        assert_eq!(changed.revision, base + 1);
+        // Changing a page keeps its spheres.
+        assert_eq!(changed.spheres, ["private", "work"]);
+    }
+    let clubs = spheres(&["clubs"]);
+    assert_eq!(
+        knowledge.page("Rust", Visibility::Within(&clubs)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_writer_with_several_spheres_must_name_one_of_them() {
+    let knowledge = knowledge();
+    let both = writer_in(&["private", "work"]);
+    let named = |sphere: Option<&str>| PageChanges {
+        sphere: sphere.map(str::to_owned),
+        ..Default::default()
+    };
+
+    let err = knowledge
+        .write_page("Rust", "", None, named(None), &both)
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereRequired(_)), "{err}");
+    assert!(err.to_string().contains("private, work"), "{err}");
+    let err = knowledge
+        .write_page("Rust", "", None, named(Some("clubs")), &both)
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereNotAllowed { .. }), "{err}");
+    assert_eq!(knowledge.page("Rust", ALL).unwrap(), None);
+
+    let page = knowledge
+        .write_page("Rust", "", None, named(Some("work")), &both)
+        .unwrap();
+    assert_eq!(page.spheres, ["work"]);
+
+    let err = knowledge.add_note("[[Rust]]", None, &both).unwrap_err();
+    assert!(matches!(err, Error::SphereRequired(_)), "{err}");
+    let err = knowledge
+        .add_note("[[Rust]]", Some("clubs"), &both)
+        .unwrap_err();
+    assert!(matches!(err, Error::SphereNotAllowed { .. }), "{err}");
+    assert!(knowledge.notes().unwrap().is_empty());
+    let note = knowledge
+        .add_note("[[Rust]]", Some("private"), &both)
+        .unwrap();
+    assert_eq!(note.spheres, ["private"]);
+}
+
+#[test]
+fn the_upgrade_gives_existing_pages_and_notes_the_default_sphere() {
+    let dir = tempfile::tempdir().unwrap();
+    let fill = "INSERT INTO page (id, title, title_key) VALUES (1, 'Old', 'old');
+         INSERT INTO revision (page_id, number, title, body) VALUES (1, 1, 'Old', '');
+         INSERT INTO note (body) VALUES ('old note');";
+
+    let path = database_at_version(&dir, 9, fill);
+    let err = Knowledge::open(&path).err().expect("upgrade must fail");
+    assert!(err.to_string().contains("default sphere"), "{err}");
+    let err = Knowledge::open_with_default_sphere(&path, Some("Not Valid"))
+        .err()
+        .expect("upgrade must fail");
+    assert!(err.to_string().contains("invalid sphere"), "{err}");
+
+    let knowledge = Knowledge::open_with_default_sphere(&path, Some("private")).unwrap();
+    assert_eq!(
+        knowledge.page("Old", ALL).unwrap().unwrap().spheres,
+        ["private"]
+    );
+    assert_eq!(knowledge.notes().unwrap()[0].spheres, ["private"]);
+    drop(knowledge);
+    // Once upgraded, the default sphere is no longer needed.
+    assert!(Knowledge::open(&path).is_ok());
+}
+
+#[test]
+fn an_empty_database_is_upgraded_without_a_default_sphere() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_version(&dir, 9, "");
+    assert!(Knowledge::open(&path).is_ok());
 }

@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use crate::search::{IndexedText, Item};
 use crate::title::title_key;
 use crate::{
-    Author, Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, increase_change_counter, links,
-    names,
+    Author, Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, Writer, increase_change_counter,
+    links, names, split_spheres,
 };
 
 /// A short, timestamped, append-only entry recording something worth remembering.
@@ -20,21 +20,29 @@ pub struct Note {
     pub author: Option<Author>,
     /// The titles the note links to, in order of first appearance.
     pub links: Vec<LinkTarget>,
+    /// The spheres the note belongs to, sorted; never empty.
+    pub spheres: Vec<String>,
 }
 
 impl Knowledge {
-    /// Records a note. Its `[[links]]` attach it to the pages (or stubs) it concerns.
-    pub fn add_note(&self, body: &str, author: &Author) -> Result<Note> {
+    /// Records a note in the sphere chosen from the writer's: `sphere`, which may be left out if
+    /// the writer has only one. Its `[[links]]` attach it to the pages (or stubs) it concerns.
+    pub fn add_note(&self, body: &str, sphere: Option<&str>, writer: &Writer) -> Result<Note> {
         if body.trim().is_empty() {
             return Err(Error::EmptyNote);
         }
+        let sphere = writer.spheres.choose(sphere)?;
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO note (body, author) VALUES (?1, ?2)",
-            params![body, author.to_string()],
+            params![body, writer.author.to_string()],
         )?;
         let note_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO note_sphere (note_id, sphere) VALUES (?1, ?2)",
+            params![note_id, sphere],
+        )?;
         let mut insert = tx.prepare(
             "INSERT INTO note_link (note_id, target_title, target_key, position) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -97,10 +105,19 @@ pub(crate) fn find_note(conn: &Connection, note_id: i64) -> Result<Option<Note>>
 }
 
 fn note(conn: &Connection, note_id: i64) -> Result<Note> {
-    let (body, created_at, author) = conn.query_row(
-        "SELECT body, created_at, author FROM note WHERE id = ?1",
+    let (body, created_at, author, spheres) = conn.query_row(
+        "SELECT body, created_at, author, \
+         (SELECT group_concat(sphere, char(10)) FROM note_sphere WHERE note_id = note.id) \
+         FROM note WHERE id = ?1",
         [note_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get(3)?,
+            ))
+        },
     )?;
     let links = conn
         .prepare(&format!(
@@ -122,5 +139,6 @@ fn note(conn: &Connection, note_id: i64) -> Result<Note> {
         created_at,
         author: author.as_deref().and_then(Author::parse),
         links,
+        spheres: split_spheres(spheres),
     })
 }

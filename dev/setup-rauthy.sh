@@ -2,7 +2,9 @@
 # Sets up Rauthy locally for mnemograph development:
 #   1. generates dev/rauthy/config.toml and the bootstrap API key (once; git-ignored),
 #   2. starts Rauthy on http://localhost:8180,
-#   3. creates the scope "mnemograph" and the pre-registered public client "claude-code",
+#   3. creates the scopes "mnemograph", "sphere:work" and "sphere:private" and the pre-registered
+#      public clients (connections) for agents: "claude-code-work" and "claude-code-private" with
+#      one sphere each, and "claude-code" with both (the spheres are in dev/spheres.toml),
 #   4. creates the owner group "mnemograph_owner" with the admin in it and the web UI's
 #      confidential client "mnemograph-web"; its secret goes to dev/rauthy/mnemograph.env.
 # Safe to run again: existing config, scope and client are kept or updated.
@@ -111,44 +113,57 @@ if [[ "$(api GET /scopes)" != 200 ]]; then
   exit 1
 fi
 
+# A token's scope "sphere:<name>" lets its connection use that sphere of dev/spheres.toml.
 existing_scopes="$(curl -sf "$RAUTHY_URL/auth/v1/scopes" -H "Authorization: API-Key $API_KEY")"
-if ! jq -e '.[] | select(.name == "mnemograph")' <<< "$existing_scopes" > /dev/null; then
-  status="$(api POST /scopes '{"scope":"mnemograph"}')"
-  [[ "$status" == 200 ]] || { echo "creating the scope failed: HTTP $status" >&2; exit 1; }
-fi
+for scope in mnemograph sphere:work sphere:private; do
+  if ! jq -e --arg s "$scope" '.[] | select(.name == $s)' <<< "$existing_scopes" > /dev/null; then
+    status="$(api POST /scopes "$(jq -n --arg s "$scope" '{scope: $s}')")"
+    [[ "$status" == 200 ]] || { echo "creating the scope $scope failed: HTTP $status" >&2; exit 1; }
+  fi
+done
 
-# Pre-registered public client for Claude Code: authorization code + PKCE (S256),
-# loopback callback on any port, tokens for mnemograph's MCP endpoint (RFC 8707).
-if [[ "$(api GET /clients/claude-code)" != 200 ]]; then
-  status="$(api POST /clients \
-    '{"id":"claude-code","name":"Claude Code","confidential":false,"redirect_uris":["http://localhost/callback"]}')"
-  [[ "$status" == 200 ]] || { echo "creating the client failed: HTTP $status" >&2; exit 1; }
-fi
-# The PUT replaces the whole client; omitting "challenges" would switch off PKCE.
-client="$(jq -n --arg resource "$MNEMOGRAPH_RESOURCE" '{
-  name: "Claude Code",
-  confidential: false,
-  enabled: true,
-  redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"],
-  flows_enabled: ["authorization_code", "refresh_token"],
-  access_token_alg: "EdDSA",
-  id_token_alg: "EdDSA",
-  auth_code_lifetime: 60,
-  access_token_lifetime: 1800,
-  scopes: ["openid", "profile", "email", "mnemograph"],
-  default_scopes: ["openid", "mnemograph"],
-  challenges: ["S256"],
-  force_mfa: false,
-  allowed_resources: [$resource],
-  default_aud: []
-}')"
-status="$(api PUT /clients/claude-code "$client")"
-[[ "$status" == 200 ]] || { echo "configuring the client failed: HTTP $status" >&2; exit 1; }
+# agent_client ID NAME SPHERE...: a pre-registered public client for Claude Code, one connection
+# for a set of spheres: authorization code + PKCE (S256), loopback callback on any port, tokens
+# for mnemograph's MCP endpoint (RFC 8707). The sphere scopes are default scopes, so every token
+# carries them without the client asking.
+agent_client() {
+  local id="$1" name="$2"; shift 2
+  local scopes; scopes="$(printf 'sphere:%s\n' "$@" | jq -R . | jq -s .)"
+  if [[ "$(api GET "/clients/$id")" != 200 ]]; then
+    status="$(api POST /clients "$(jq -n --arg id "$id" --arg name "$name" \
+      '{id: $id, name: $name, confidential: false, redirect_uris: ["http://localhost/callback"]}')")"
+    [[ "$status" == 200 ]] || { echo "creating the client $id failed: HTTP $status" >&2; exit 1; }
+  fi
+  # The PUT replaces the whole client; omitting "challenges" would switch off PKCE.
+  local client; client="$(jq -n --arg resource "$MNEMOGRAPH_RESOURCE" --arg name "$name" \
+    --argjson spheres "$scopes" '{
+    name: $name,
+    confidential: false,
+    enabled: true,
+    redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"],
+    flows_enabled: ["authorization_code", "refresh_token"],
+    access_token_alg: "EdDSA",
+    id_token_alg: "EdDSA",
+    auth_code_lifetime: 60,
+    access_token_lifetime: 1800,
+    scopes: (["openid", "profile", "email", "mnemograph"] + $spheres),
+    default_scopes: (["openid", "mnemograph"] + $spheres),
+    challenges: ["S256"],
+    force_mfa: false,
+    allowed_resources: [$resource],
+    default_aud: []
+  }')"
+  status="$(api PUT "/clients/$id" "$client")"
+  [[ "$status" == 200 ]] || { echo "configuring the client $id failed: HTTP $status" >&2; exit 1; }
+}
+agent_client claude-code-work "Claude Code (work)" work
+agent_client claude-code-private "Claude Code (private)" private
+agent_client claude-code "Claude Code (work and private)" work private
 
 # The web UI: only members of the owner group may log in.
 if [[ "$(api GET /groups)" != 200 ]]; then
   cat >&2 <<HINT
-The client for agents (claude-code) is ready, but the web UI needs more rights for the
+The clients for agents (claude-code-work, claude-code-private, claude-code) are ready, but the web UI needs more rights for the
 bootstrap API key than this Rauthy instance gave it (it was set up by an older version of this
 script, and Rauthy reads bootstrap files only on its very first start). Either
   - start over:  docker compose -f dev/compose.yaml down -v && rm -r dev/rauthy
@@ -207,6 +222,7 @@ web_secret="$(curl -sf -X POST "$RAUTHY_URL/auth/v1/clients/mnemograph-web/secre
 umask 077
 cat > "$CONFIG_DIR/mnemograph.env" <<ENV_EOF
 MNEMOGRAPH_OIDC_ISSUER=$RAUTHY_URL/auth/v1/
+MNEMOGRAPH_SPHERES=dev/spheres.toml
 MNEMOGRAPH_PUBLIC_URL=$MNEMOGRAPH_URL
 MNEMOGRAPH_WEB_CLIENT_ID=mnemograph-web
 MNEMOGRAPH_WEB_CLIENT_SECRET=$web_secret
@@ -218,12 +234,17 @@ cat <<DONE
 Rauthy is ready at $RAUTHY_URL (admin UI: $RAUTHY_URL/auth/v1/admin)
   admin login:  $ADMIN_EMAIL / $ADMIN_PASSWORD   (also in dev/$SECRETS)
   issuer:       $RAUTHY_URL/auth/v1/
-  clients:      claude-code (public, PKCE; agents), mnemograph-web (confidential, PKCE; web UI)
+  connections:  claude-code-work (sphere work), claude-code-private (sphere private),
+                claude-code (both; must name a sphere when creating); public clients with PKCE
+  web client:   mnemograph-web (confidential, PKCE)
   owner group:  $OWNER_GROUP (contains $ADMIN_EMAIL)
 
 Next:
   set -a; . dev/rauthy/mnemograph.env; set +a; cargo run -- serve
-  claude mcp add --transport http --client-id claude-code mnemograph $MNEMOGRAPH_RESOURCE
+  # one connection per repository, e.g. in a work repository (-s project writes .mcp.json):
+  claude mcp add -s project --transport http --client-id claude-code-work mnemograph $MNEMOGRAPH_RESOURCE
+  # and in a private one:
+  claude mcp add -s project --transport http --client-id claude-code-private mnemograph $MNEMOGRAPH_RESOURCE
   claude mcp login mnemograph      # or /mcp inside a Claude Code session
   open $MNEMOGRAPH_URL/ in the browser and log in as $ADMIN_EMAIL
 DONE

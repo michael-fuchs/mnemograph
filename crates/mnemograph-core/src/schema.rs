@@ -5,7 +5,10 @@ use rusqlite_migration::{HookError, HookResult, M, Migrations};
 
 use crate::title::title_key;
 
-pub(crate) fn migrations() -> Migrations<'static> {
+/// The migrations up to the latest schema. `default_sphere` is the sphere that pages and notes
+/// from before spheres get; the upgrade fails without one if there are any.
+pub(crate) fn migrations(default_sphere: Option<&str>) -> Migrations<'static> {
+    let default_sphere = default_sphere.map(str::to_owned);
     Migrations::new(vec![
         M::up(include_str!("../migrations/0001-pages.sql")),
         M::up(include_str!("../migrations/0002-revisions.sql")),
@@ -19,6 +22,10 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/0007-authors.sql")),
         M::up(include_str!("../migrations/0008-sessions.sql")),
         M::up(include_str!("../migrations/0009-access-log.sql")),
+        M::up_with_hook(
+            include_str!("../migrations/0010-spheres.sql"),
+            move |tx: &Transaction<'_>| assign_default_sphere(tx, default_sphere.as_deref()),
+        ),
     ])
 }
 
@@ -57,10 +64,45 @@ fn fill_title_keys_and_links(tx: &Transaction<'_>) -> HookResult {
     Ok(())
 }
 
+/// Gives every page and note the default sphere; refuses the upgrade if there are any but no
+/// default sphere was chosen.
+fn assign_default_sphere(tx: &Transaction<'_>, default_sphere: Option<&str>) -> HookResult {
+    let existing: i64 = tx.query_row(
+        "SELECT (SELECT count(*) FROM page) + (SELECT count(*) FROM note)",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing == 0 {
+        return Ok(());
+    }
+    let Some(sphere) = default_sphere else {
+        return Err(HookError::Hook(
+            "pages and notes now belong to spheres: choose the default sphere the existing ones get \
+             (--default-sphere)"
+                .to_owned(),
+        ));
+    };
+    if !crate::is_sphere_name(sphere) {
+        return Err(HookError::Hook(
+            crate::Error::InvalidSphere(sphere.to_owned()).to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO page_sphere (page_id, sphere) SELECT id, ?1 FROM page",
+        [sphere],
+    )?;
+    tx.execute(
+        "INSERT INTO note_sphere (note_id, sphere) SELECT id, ?1 FROM note",
+        [sphere],
+    )?;
+    tracing::info!(sphere, "gave existing pages and notes the default sphere");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn migrations_are_valid() {
-        super::migrations().validate().unwrap();
+        super::migrations(None).validate().unwrap();
     }
 }

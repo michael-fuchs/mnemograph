@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mnemograph_core::{
     Access, Author, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges,
-    Related, SearchHit,
+    Related, SearchHit, Visibility, Writer,
 };
 use rmcp::{
     ServerHandler,
@@ -80,6 +80,8 @@ pub struct PageView {
     /// Who wrote the current revision: "owner:<user>", "agent:<client>" or "anonymous".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<String>,
+    /// The spheres the page belongs to.
+    pub spheres: Vec<String>,
     /// Titles this page links to, in order of appearance.
     pub links: Vec<LinkView>,
     /// Titles of the pages linking to this page.
@@ -99,6 +101,8 @@ pub struct NoteView {
     pub author: Option<String>,
     /// Titles the note links to.
     pub links: Vec<LinkView>,
+    /// The spheres the note belongs to.
+    pub spheres: Vec<String>,
 }
 
 impl From<Note> for NoteView {
@@ -109,6 +113,7 @@ impl From<Note> for NoteView {
             created_at: note.created_at,
             author: note.author.as_ref().map(ToString::to_string),
             links: note.links.into_iter().map(LinkView::from).collect(),
+            spheres: note.spheres,
         }
     }
 }
@@ -146,6 +151,7 @@ impl PageView {
             created_at: page.created_at,
             updated_at: page.updated_at,
             updated_by: page.author.as_ref().map(ToString::to_string),
+            spheres: page.spheres,
             links: links.outgoing.into_iter().map(LinkView::from).collect(),
             backlinks: links.backlinks,
             notes: notes.into_iter().map(NoteView::from).collect(),
@@ -175,6 +181,11 @@ pub struct WritePageArgs {
     /// Replaces all aliases (alternative titles leading to this page). Omit to keep them.
     #[serde(default)]
     pub aliases: Option<Vec<String>>,
+    /// The sphere a new page belongs to. Required when creating a page if this connection has
+    /// several spheres (the error lists them); may be omitted if it has one. Ignored when
+    /// changing a page.
+    #[serde(default)]
+    pub sphere: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -182,6 +193,10 @@ pub struct AddNoteArgs {
     /// The note in Markdown: what happened or was decided, and why. Link the pages it concerns
     /// with [[Title]]; titles without a page yet are fine.
     pub body: String,
+    /// The sphere the note belongs to. Required if this connection has several spheres (the
+    /// error lists them); may be omitted if it has one.
+    #[serde(default)]
+    pub sphere: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -298,7 +313,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create a page, or change an existing one. To create, omit base_revision (fails if the title or an alias already exists). To change, send the complete new body (not a diff) and the page's current revision as base_revision; omitted page_type and aliases stay as they are. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision. Returns the page with its links, marking stubs."
+        description = "Create a page, or change an existing one. To create, omit base_revision (fails if the title or an alias already exists). To change, send the complete new body (not a diff) and the page's current revision as base_revision; omitted page_type and aliases stay as they are. If the page changed in the meantime, the write is rejected and the error contains the current revision: merge your change into it and retry with that revision. A new page belongs to this connection's sphere; if the connection has several, name one with sphere. Returns the page with its links, marking stubs."
     )]
     async fn write_page(
         &self,
@@ -309,9 +324,9 @@ impl McpServer {
             .base_revision
             .map(|base| u32::try_from(base).map_err(|_| format!("invalid base_revision {base}")))
             .transpose()?;
-        let author = author(&request)?;
+        let writer = writer(&request)?;
         self.limiter.check_page(&args.body)?;
-        self.limiter.count_write(&author)?;
+        self.limiter.count_write(&writer.author)?;
         let knowledge = self.knowledge.clone();
         blocking(move || {
             let changes = PageChanges {
@@ -320,9 +335,10 @@ impl McpServer {
                     .page_type
                     .map(|t| Some(t).filter(|t| !t.trim().is_empty())),
                 aliases: args.aliases,
+                sphere: args.sphere.filter(|s| !s.trim().is_empty()),
             };
             let page =
-                knowledge.write_page(&args.title, &args.body, base_revision, changes, &author)?;
+                knowledge.write_page(&args.title, &args.body, base_revision, changes, &writer)?;
             let links = knowledge.links(&page.title)?;
             let notes = knowledge.notes_about(&page.title, RECENT_NOTES)?;
             Ok(PageView::new(page, links, notes))
@@ -343,10 +359,11 @@ impl McpServer {
         let knowledge = self.knowledge.clone();
         let title = args.title;
         let reader = reader(&request);
+        let spheres = writer(&request)?.spheres;
         let (page, links, notes) = blocking({
             let title = title.clone();
             move || {
-                let page = knowledge.page(&title)?;
+                let page = knowledge.page(&title, Visibility::Within(&spheres))?;
                 log_access(
                     &knowledge,
                     reader,
@@ -354,6 +371,10 @@ impl McpServer {
                     &title,
                     page.is_some().into(),
                 );
+                // A page of other spheres is treated as missing, not as a stub.
+                if page.is_none() && knowledge.page(&title, Visibility::All)?.is_some() {
+                    return Ok((None, Links::default(), Vec::new()));
+                }
                 Ok((
                     page,
                     knowledge.links(&title)?,
@@ -425,7 +446,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Record a note: a short, timestamped, append-only entry such as a decision, finding or event. [[Title]] links attach it to the pages it concerns, where read_page shows it."
+        description = "Record a note: a short, timestamped, append-only entry such as a decision, finding or event. [[Title]] links attach it to the pages it concerns, where read_page shows it. The note belongs to this connection's sphere; if the connection has several, name one with sphere."
     )]
     async fn add_note(
         &self,
@@ -433,10 +454,11 @@ impl McpServer {
         Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<NoteView>, String> {
         let knowledge = self.knowledge.clone();
-        let author = author(&request)?;
+        let writer = writer(&request)?;
         self.limiter.check_note(&args.body)?;
-        self.limiter.count_write(&author)?;
-        blocking(move || knowledge.add_note(&args.body, &author))
+        self.limiter.count_write(&writer.author)?;
+        let sphere = args.sphere.filter(|s| !s.trim().is_empty());
+        blocking(move || knowledge.add_note(&args.body, sphere.as_deref(), &writer))
             .await
             .inspect(|_| self.changed())
             .map(|note| rmcp::Json(note.into()))
@@ -451,7 +473,7 @@ impl McpServer {
 
     /// Points agents to the usage page by its current title, or nothing while it doesn't exist.
     fn usage_hint(&self) -> String {
-        match self.knowledge.page(USAGE_PAGE) {
+        match self.knowledge.page(USAGE_PAGE, Visibility::All) {
             Ok(Some(page)) => format!(
                 "Start here: the page \"{}\" holds the owner's conventions for filing knowledge \
                  (hub pages, decision pages, notes versus pages). Read it with read_page at the \
@@ -505,11 +527,15 @@ fn log_access(
     }
 }
 
-/// The author of a write: the identity the authentication middleware attached to the request.
-/// Without one the write is refused, so a misconfigured router can never record a wrong author.
-fn author(request: &http::request::Parts) -> Result<Author, String> {
+/// Who acts: the identity the authentication middleware attached to the request, with the
+/// spheres of its registration. Without one the call is refused, so a misconfigured router can
+/// never record a wrong author or cross a sphere boundary.
+fn writer(request: &http::request::Parts) -> Result<Writer, String> {
     match request.extensions.get::<Identity>() {
-        Some(identity) => Ok(identity.author.clone()),
+        Some(identity) => Ok(Writer {
+            author: identity.author.clone(),
+            spheres: identity.spheres.clone(),
+        }),
         None => {
             tracing::error!("request without identity reached a tool");
             Err("internal error".to_owned())

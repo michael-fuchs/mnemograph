@@ -3,12 +3,13 @@
 pub mod auth;
 mod limits;
 mod mcp;
+pub mod spheres;
 pub mod web;
 
 use std::sync::Arc;
 
 use axum::{Json, Router, middleware, routing::get};
-use mnemograph_core::Knowledge;
+use mnemograph_core::{Knowledge, Spheres};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -19,6 +20,7 @@ pub use limits::WriteLimits;
 pub use mcp::{
     HitView, LinkView, McpServer, NoteView, PageView, RelatedEntry, RelatedView, SearchView,
 };
+pub use spheres::SphereConfig;
 
 /// How many days the access log keeps entries unless configured otherwise.
 pub const DEFAULT_ACCESS_LOG_DAYS: u32 = 90;
@@ -30,6 +32,8 @@ pub struct AppConfig {
     /// Validates agents' access tokens. `None` disables authentication: every request is
     /// anonymous, which is only acceptable on a loopback address during development.
     pub auth: Option<Arc<Authenticator>>,
+    /// The configured spheres. Without authentication, every request may use all of them.
+    pub spheres: Spheres,
     /// Host names (optionally with port) under which clients reach the server; requests with
     /// another `Host` header are rejected (DNS rebinding protection).
     pub allowed_hosts: Vec<String>,
@@ -90,7 +94,10 @@ pub fn app(knowledge: Arc<Knowledge>, config: AppConfig) -> Router {
         None => router.nest_service(
             "/mcp",
             tower::ServiceBuilder::new()
-                .layer(middleware::from_fn(auth::anonymous))
+                .layer(middleware::from_fn_with_state(
+                    config.spheres,
+                    auth::anonymous,
+                ))
                 .service(mcp),
         ),
         Some(authenticator) => {

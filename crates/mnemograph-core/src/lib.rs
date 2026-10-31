@@ -14,6 +14,7 @@ mod related;
 mod schema;
 mod search;
 mod sessions;
+mod sphere;
 mod stats;
 mod title;
 
@@ -29,6 +30,7 @@ pub use export::ExportSummary;
 pub use notes::Note;
 pub use related::{GraphNode, MAX_HOPS, Neighborhood, Related, WikiGraph};
 pub use sessions::Session;
+pub use sphere::{Spheres, Visibility, Writer, is_sphere_name};
 pub use stats::{AuthorActivity, Totals, Week, WeeklyActivity};
 
 use search::{IndexedText, Item, SearchIndex};
@@ -69,6 +71,19 @@ pub enum Error {
     UnknownPageType { given: String, allowed: Vec<String> },
     #[error("a note must not be empty")]
     EmptyNote,
+    #[error(
+        "invalid sphere {0:?}: sphere names are lowercase letters, digits and -, start with a letter and have at most 32 characters"
+    )]
+    InvalidSphere(String),
+    #[error("at least one sphere is required")]
+    NoSphere,
+    #[error("the sphere {given:?} is not available here; available spheres: {}", .allowed.join(", "))]
+    SphereNotAllowed { given: String, allowed: Vec<String> },
+    #[error("name the sphere it belongs to, one of: {}", .0.join(", "))]
+    SphereRequired(Vec<String>),
+    /// The name belongs to a page the writer cannot see. The error must not reveal more.
+    #[error("the title {0:?} is not available; choose another one")]
+    TitleUnavailable(String),
     #[error("the export directory {0} is not empty")]
     ExportTargetNotEmpty(String),
     #[error("file error: {0}")]
@@ -117,6 +132,8 @@ pub struct Page {
     pub updated_at: String,
     /// Who created this revision; `None` for revisions from before authors were recorded.
     pub author: Option<Author>,
+    /// The spheres the page belongs to, sorted; never empty.
+    pub spheres: Vec<String>,
 }
 
 /// What a write changes besides the body. `None` fields keep their current value (for a new
@@ -129,6 +146,9 @@ pub struct PageChanges {
     pub page_type: Option<Option<String>>,
     /// Replaces all aliases.
     pub aliases: Option<Vec<String>>,
+    /// For a new page: the sphere it gets, one of the writer's. It may be left out if the
+    /// writer has only one. Ignored when changing a page.
+    pub sphere: Option<String>,
 }
 
 /// One entry of a page's history.
@@ -200,6 +220,15 @@ impl Knowledge {
     /// search index lives next to it in `<path>.search/` and is rebuilt if it is missing or
     /// outdated.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_default_sphere(path, None)
+    }
+
+    /// Like [`Knowledge::open`]; if the database is upgraded to spheres, its existing pages and
+    /// notes get `default_sphere`. Without one, such an upgrade fails.
+    pub fn open_with_default_sphere(
+        path: impl AsRef<Path>,
+        default_sphere: Option<&str>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let mut index_dir = path.as_os_str().to_owned();
         index_dir.push(".search");
@@ -210,18 +239,26 @@ impl Knowledge {
             }
             err => err.into(),
         })?;
-        Self::init(Connection::open(path)?, search)
+        Self::init(Connection::open(path)?, search, default_sphere)
     }
 
     /// Opens a fresh in-memory database, mainly for tests.
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?, SearchIndex::in_memory()?)
+        Self::init(
+            Connection::open_in_memory()?,
+            SearchIndex::in_memory()?,
+            None,
+        )
     }
 
-    fn init(mut conn: Connection, search: SearchIndex) -> Result<Self> {
+    fn init(
+        mut conn: Connection,
+        search: SearchIndex,
+        default_sphere: Option<&str>,
+    ) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        schema::migrations().to_latest(&mut conn)?;
+        schema::migrations(default_sphere).to_latest(&mut conn)?;
         let knowledge = Self {
             conn: Mutex::new(conn),
             search,
@@ -337,17 +374,19 @@ impl Knowledge {
 
     /// Creates or changes the page with this title or alias.
     ///
-    /// Without `base_revision` this only creates a new page. Changing an existing page requires
-    /// its current revision as `base_revision`, so that a writer never overwrites a change it
-    /// has not seen; otherwise [`Error::Conflict`] returns the current revision. A write that
-    /// changes nothing creates no new revision.
+    /// Without `base_revision` this only creates a new page, in the sphere chosen from the
+    /// writer's ([`PageChanges::sphere`]). Changing an existing page requires its current
+    /// revision as `base_revision`, so that a writer never overwrites a change it has not seen;
+    /// otherwise [`Error::Conflict`] returns the current revision. A write that changes nothing
+    /// creates no new revision. Pages outside the writer's spheres are treated as missing, but
+    /// their names cannot be taken ([`Error::TitleUnavailable`]).
     pub fn write_page(
         &self,
         title: &str,
         body: &str,
         base_revision: Option<u32>,
         changes: PageChanges,
-        author: &Author,
+        writer: &Writer,
     ) -> Result<Page> {
         let title = clean_title(title)?;
         let page_type = match changes.page_type {
@@ -357,11 +396,19 @@ impl Knowledge {
         let mut conn = self.conn();
         let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate)?;
 
+        let visibility = writer.visibility();
         let (page_id, next) = match resolve(&tx, &title_key(&title))? {
+            Some(page_id) if !visibility.sees(&page_spheres(&tx, page_id)?) => {
+                return Err(match base_revision {
+                    Some(_) => Error::PageNotFound(title),
+                    None => Error::TitleUnavailable(title),
+                });
+            }
             None => {
                 if base_revision.is_some() {
                     return Err(Error::PageNotFound(title));
                 }
+                let sphere = writer.spheres.choose(changes.sphere.as_deref())?;
                 let new_title = match changes.new_title {
                     Some(new_title) => clean_title(&new_title)?,
                     None => title,
@@ -372,12 +419,17 @@ impl Knowledge {
                     aliases: changes.aliases.unwrap_or_default(),
                     body: body.to_owned(),
                 }
-                .normalized(&tx, NO_PAGE)?;
+                .normalized(&tx, NO_PAGE, visibility)?;
                 tx.execute(
                     "INSERT INTO page (title, title_key) VALUES (?1, ?2)",
                     params![snapshot.title, title_key(&snapshot.title)],
                 )?;
-                (tx.last_insert_rowid(), snapshot)
+                let page_id = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO page_sphere (page_id, sphere) VALUES (?1, ?2)",
+                    params![page_id, sphere],
+                )?;
+                (page_id, snapshot)
             }
             Some(page_id) => {
                 let current = current_page(&tx, page_id)?;
@@ -401,7 +453,7 @@ impl Knowledge {
                     aliases,
                     body: body.to_owned(),
                 }
-                .normalized(&tx, page_id)?;
+                .normalized(&tx, page_id, visibility)?;
                 if snapshot.matches(&current) {
                     return Ok(current);
                 }
@@ -409,7 +461,7 @@ impl Knowledge {
             }
         };
 
-        next.store(&tx, page_id, author)?;
+        next.store(&tx, page_id, &writer.author)?;
         increase_change_counter(&tx)?;
         let page = current_page(&tx, page_id)?;
         tx.commit()?;
@@ -428,13 +480,15 @@ impl Knowledge {
         Ok(page)
     }
 
-    /// Returns the current revision of the page with this title or alias, if it exists.
-    pub fn page(&self, title: &str) -> Result<Option<Page>> {
+    /// Returns the current revision of the page with this title or alias, if it exists and is
+    /// visible.
+    pub fn page(&self, title: &str, visibility: Visibility<'_>) -> Result<Option<Page>> {
         let conn = self.conn();
-        match resolve(&conn, &title_key(title))? {
-            Some(page_id) => Ok(Some(current_page(&conn, page_id)?)),
-            None => Ok(None),
-        }
+        let Some(page_id) = resolve(&conn, &title_key(title))? else {
+            return Ok(None);
+        };
+        let page = current_page(&conn, page_id)?;
+        Ok(visibility.sees(&page.spheres).then_some(page))
     }
 
     /// Returns the current revision of every page, sorted by title.
@@ -590,6 +644,14 @@ fn names(conn: &Connection, title: &str) -> Result<(Option<i64>, Vec<String>)> {
     Ok((Some(page_id), keys))
 }
 
+/// The spheres of a page, sorted.
+fn page_spheres(conn: &Connection, page_id: i64) -> Result<Vec<String>> {
+    Ok(conn
+        .prepare("SELECT sphere FROM page_sphere WHERE page_id = ?1 ORDER BY sphere")?
+        .query_map([page_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// Titles of the pages linking to any of `keys`, except `page_id` itself.
 fn backlinks(conn: &Connection, page_id: Option<i64>, keys: &[String]) -> Result<Vec<String>> {
     let mut backlinks = Vec::new();
@@ -617,8 +679,13 @@ struct Snapshot {
 
 impl Snapshot {
     /// Cleans and sorts the aliases, drops those equal to the title, and checks that neither
-    /// title nor aliases belong to another page.
-    fn normalized(mut self, conn: &Connection, page_id: i64) -> Result<Self> {
+    /// title nor aliases belong to another page. Another page outside `visibility` is not named.
+    fn normalized(
+        mut self,
+        conn: &Connection,
+        page_id: i64,
+        visibility: Visibility<'_>,
+    ) -> Result<Self> {
         let mut aliases: Vec<String> = Vec::new();
         for alias in &self.aliases {
             let alias = clean_title(alias)?;
@@ -635,6 +702,9 @@ impl Snapshot {
             if let Some(owner) = resolve(conn, &title_key(name))?
                 && owner != page_id
             {
+                if !visibility.sees(&page_spheres(conn, owner)?) {
+                    return Err(Error::TitleUnavailable(name.clone()));
+                }
                 let page =
                     conn.query_row("SELECT title FROM page WHERE id = ?1", [owner], |row| {
                         row.get(0)
@@ -716,10 +786,14 @@ fn increase_change_counter(conn: &Connection) -> Result<()> {
 }
 
 const PAGE_SELECT_WITH_ID: &str = "SELECT p.id, r.title, r.page_type, r.aliases, r.body, \
-     r.number, p.created_at, r.created_at, r.author FROM page p JOIN revision r ON r.page_id = p.id";
+     r.number, p.created_at, r.created_at, r.author, \
+     (SELECT group_concat(sphere, char(10)) FROM page_sphere WHERE page_id = p.id) \
+     FROM page p JOIN revision r ON r.page_id = p.id";
 
 const PAGE_SELECT: &str = "SELECT r.title, r.page_type, r.aliases, r.body, r.number, \
-     p.created_at, r.created_at, r.author FROM page p JOIN revision r ON r.page_id = p.id";
+     p.created_at, r.created_at, r.author, \
+     (SELECT group_concat(sphere, char(10)) FROM page_sphere WHERE page_id = p.id) \
+     FROM page p JOIN revision r ON r.page_id = p.id";
 
 fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     row_to_page_from(row, 0)
@@ -744,7 +818,20 @@ fn row_to_page_from(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<P
             .get::<_, Option<String>>(first + 7)?
             .as_deref()
             .and_then(Author::parse),
+        spheres: split_spheres(row.get(first + 8)?),
     })
+}
+
+/// Splits a newline-separated `group_concat` of spheres into a sorted list.
+pub(crate) fn split_spheres(spheres: Option<String>) -> Vec<String> {
+    let mut spheres: Vec<String> = spheres
+        .unwrap_or_default()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    spheres.sort();
+    spheres
 }
 
 fn current_page(conn: &Connection, page_id: i64) -> Result<Page> {

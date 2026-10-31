@@ -1,0 +1,19 @@
+# The spheres file for local development, in the format of the part of the central assistant
+# configuration that mnemograph gets (version 1). In production this file is generated from the
+# central configuration and mounted read-only; pass it with --spheres (MNEMOGRAPH_SPHERES).
+#
+# Each sphere is a table under `spheres`, named with lowercase letters, digits and -, starting
+# with a letter, at most 32 characters. The name is what pages and notes carry and what an access
+# token names in its scope `sphere:<name>`.
+version = 1
+
+[spheres.work]
+description = "Employer, projects, colleagues"
+
+[spheres.private]
+description = "Family, home, finances"
+
+# Sphere rules may follow each sphere; mnemograph does not apply them yet:
+# [spheres.private.rules]
+# wiki = "allowed"   # or "never": the sphere's content must not enter the wiki
+# llm = ["mistral"]  # the only LLM providers that may receive the sphere's content

@@ -32,6 +32,7 @@ impl TestServer {
             Arc::new(knowledge),
             mnemograph::AppConfig {
                 auth: None,
+                spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
                 allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
                 limits,
                 web_login: None,

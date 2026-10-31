@@ -16,7 +16,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use mnemograph_core::Author;
+use mnemograph_core::{Author, Spheres};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -28,11 +28,15 @@ const ACCESS_TOKEN_TYPE: &str = "at+jwt";
 /// Unknown key IDs trigger a JWKS refresh, but not more often than this.
 const JWKS_MIN_REFRESH: Duration = Duration::from_secs(60);
 const CLOCK_LEEWAY_SECS: u64 = 30;
+/// An access token's scope `sphere:<name>` lets its registration use the sphere `<name>`.
+pub const SPHERE_SCOPE_PREFIX: &str = "sphere:";
 
-/// Who made a request.
+/// Who made a request, and the spheres they may use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub author: Author,
+    /// The spheres of the agent's registration (all spheres without authentication).
+    pub spheres: Spheres,
 }
 
 /// How mnemograph checks tokens.
@@ -45,6 +49,8 @@ pub struct AuthSettings {
     pub resource: String,
     /// Scopes a token must have to use mnemograph.
     pub required_scopes: Vec<String>,
+    /// The configured spheres; a token must carry the scope of at least one of them.
+    pub spheres: Spheres,
 }
 
 impl AuthSettings {
@@ -95,6 +101,11 @@ pub enum AuthError {
     InvalidToken(String),
     #[error("the token lacks the scopes {0:?}")]
     InsufficientScope(Vec<String>),
+    #[error(
+        "the token carries no sphere: its client must have the scope {SPHERE_SCOPE_PREFIX}<name> of at least one of the spheres {}",
+        .0.join(", ")
+    )]
+    NoSphere(Vec<String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +127,7 @@ mod tests {
             issuer: "http://localhost:8443/auth/v1".into(),
             resource: resource.into(),
             required_scopes: vec![],
+            spheres: Spheres::new(["work"]).unwrap(),
         }
     }
 
@@ -263,7 +275,8 @@ impl Authenticator {
         &self.settings
     }
 
-    /// Validates a bearer token and returns who sent it.
+    /// Validates a bearer token and returns who sent it, with the spheres its `sphere:<name>`
+    /// scopes name. Scopes of spheres that are not configured are ignored.
     pub async fn authenticate(&self, token: &str) -> Result<Identity, AuthError> {
         let invalid = |reason: &str| AuthError::InvalidToken(reason.to_owned());
         let header = jsonwebtoken::decode_header(token).map_err(|e| invalid(&e.to_string()))?;
@@ -314,9 +327,20 @@ impl Authenticator {
             .client_id
             .or(claims.azp)
             .ok_or_else(|| invalid("no client ID (client_id or azp)"))?;
-        tracing::debug!(%client, sub = ?claims.sub, "authenticated agent");
+        let known = &self.settings.spheres;
+        let (spheres, unknown): (Vec<&str>, Vec<&str>) = granted
+            .iter()
+            .filter_map(|scope| scope.strip_prefix(SPHERE_SCOPE_PREFIX))
+            .partition(|sphere| known.contains(sphere));
+        if !unknown.is_empty() {
+            tracing::debug!(%client, ?unknown, "ignored scopes of unknown spheres");
+        }
+        let spheres =
+            Spheres::new(spheres).map_err(|_| AuthError::NoSphere(known.names().to_vec()))?;
+        tracing::debug!(%client, sub = ?claims.sub, spheres = ?spheres.names(), "authenticated agent");
         Ok(Identity {
             author: Author::Agent(client),
+            spheres,
         })
     }
 
@@ -426,10 +450,16 @@ pub async fn require_token(
     }
 }
 
-/// Middleware for local development without authentication: every request is anonymous.
-pub async fn anonymous(mut request: Request, next: Next) -> Response {
+/// Middleware for local development without authentication: every request is anonymous and
+/// may use all configured spheres.
+pub async fn anonymous(
+    State(spheres): State<Spheres>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     request.extensions_mut().insert(Identity {
         author: Author::Anonymous,
+        spheres,
     });
     next.run(request).await
 }
@@ -452,6 +482,13 @@ fn challenge(settings: &AuthSettings, err: &AuthError) -> Response {
         }
         AuthError::InsufficientScope(_) => {
             value += ", error=\"insufficient_scope\"";
+            StatusCode::FORBIDDEN
+        }
+        AuthError::NoSphere(_) => {
+            value += &format!(
+                ", error=\"insufficient_scope\", error_description=\"{}\"",
+                err.to_string().replace(['"', '\\'], "'")
+            );
             StatusCode::FORBIDDEN
         }
     };
