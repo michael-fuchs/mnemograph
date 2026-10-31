@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block title %}Search – mnemograph{% endblock %}
 {% block content %}
 <h1>Search</h1>
@@ -16,13 +17,14 @@
 <p class="error">{{ error }}</p>
 {% else if searched %}
 {% if hits.is_empty() %}
-<p class="empty">Nothing found.</p>
+<p class="empty">Nothing found{% if header.filtered %} in the spheres {{ header.sphere_summary }}{% endif %}.</p>
 {% else %}
 <ol class="hits">
   {% for hit in hits %}
   <li class="hit {{ hit.kind }}">
     <a href="{{ hit.url }}">{{ hit.title }}</a>
     {% if let Some(t) = hit.page_type %}<span class="type">{{ t }}</span>{% endif %}
+    {% call m::spheres(hit.spheres) %}{% endcall %}
     {% if !hit.meta.is_empty() %}<span class="meta">{{ hit.meta }}</span>{% endif %}
     <p class="snippet">{{ hit.snippet_html|safe }}</p>
   </li>

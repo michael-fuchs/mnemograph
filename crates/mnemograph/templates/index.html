@@ -3,21 +3,28 @@
 {% block content %}
 <h1>Pages</h1>
 {% if pages.is_empty() %}
-<p class="empty">No pages yet. Agents create them with <code>write_page</code>.</p>
+{% if header.filtered %}
+<p class="empty">No pages in the spheres {{ header.sphere_summary }}.</p>
 {% else %}
+<p class="empty">No pages yet. Agents create them with <code>write_page</code>.</p>
+{% endif %}
+{% else %}
+<div class="table-scroll">
 <table class="pages">
-  <thead><tr><th>Title</th><th>Type</th><th>Updated</th><th>By</th></tr></thead>
+  <thead><tr><th>Title</th><th>Type</th><th>Spheres</th><th>Updated</th><th>By</th></tr></thead>
   <tbody>
     {% for page in pages %}
     <tr>
       <td><a href="{{ page.url }}">{{ page.title }}</a></td>
       <td>{% if let Some(t) = page.page_type %}<span class="type">{{ t }}</span>{% endif %}</td>
+      <td>{% call m::spheres(page.spheres) %}{% endcall %}</td>
       <td class="nowrap">{{ page.updated_at }}</td>
       <td>{{ page.updated_by }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2>Recent notes</h2>

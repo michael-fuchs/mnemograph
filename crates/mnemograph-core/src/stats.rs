@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rusqlite::Connection;
 
-use crate::{Author, GraphNode, Knowledge, RESOLVED_KEYS, Result};
+use crate::{Author, GraphNode, Knowledge, Result, Visibility};
 
 /// How much knowledge there is now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,20 +48,29 @@ pub struct WeeklyActivity {
     pub authors: Vec<(Option<Author>, Vec<u32>)>,
 }
 
-/// Revisions and notes with their author and time, for a `WITH` clause.
-const WRITES: &str = "event (author, created_at, revision, note) AS ( \
-       SELECT author, created_at, 1, 0 FROM revision \
-       UNION ALL SELECT author, created_at, 0, 1 FROM note)";
+/// Revisions of visible pages and visible notes with their author and time, for a `WITH`
+/// clause.
+fn writes(visibility: Visibility<'_>) -> String {
+    format!(
+        "event (author, created_at, revision, note) AS ( \
+           SELECT author, created_at, 1, 0 FROM revision WHERE {} \
+           UNION ALL SELECT author, created_at, 0, 1 FROM note WHERE {})",
+        visibility.pages("page_id"),
+        visibility.notes("id")
+    )
+}
 
 impl Knowledge {
-    /// Everyone who wrote revisions or notes, most writes first, then by latest write.
-    pub fn author_activity(&self) -> Result<Vec<AuthorActivity>> {
+    /// Everyone who wrote revisions of visible pages or visible notes, most writes first, then
+    /// by latest write.
+    pub fn author_activity(&self, visibility: Visibility<'_>) -> Result<Vec<AuthorActivity>> {
         let conn = self.conn();
         let mut query = conn.prepare(&format!(
-            "WITH {WRITES} \
+            "WITH {} \
              SELECT author, sum(revision), sum(note), min(created_at), max(created_at) \
              FROM event GROUP BY author \
-             ORDER BY count(*) DESC, max(created_at) DESC"
+             ORDER BY count(*) DESC, max(created_at) DESC",
+            writes(visibility)
         ))?;
         let activity = query
             .query_map([], |row| {
@@ -79,54 +88,75 @@ impl Knowledge {
     }
 
     /// Revisions plus notes per week and author, from the week of the first write to the
-    /// current week; empty if nothing was written.
-    pub fn weekly_activity(&self) -> Result<WeeklyActivity> {
-        self.weekly_activity_until("now")
+    /// current week; empty if nothing was written. Only visible pages and notes count.
+    pub fn weekly_activity(&self, visibility: Visibility<'_>) -> Result<WeeklyActivity> {
+        self.weekly_activity_until("now", visibility)
     }
 
     /// [`Knowledge::weekly_activity`] up to the week of `until` (an SQLite date such as `now`).
-    pub(crate) fn weekly_activity_until(&self, until: &str) -> Result<WeeklyActivity> {
-        weekly_per_author(&self.conn(), WRITES, until)
+    pub(crate) fn weekly_activity_until(
+        &self,
+        until: &str,
+        visibility: Visibility<'_>,
+    ) -> Result<WeeklyActivity> {
+        weekly_per_author(&self.conn(), &writes(visibility), until)
     }
 
-    /// Counts pages, stubs, links, notes and revisions.
-    pub fn totals(&self) -> Result<Totals> {
+    /// Counts visible pages, stubs, links, notes and revisions. As everywhere, a page that is
+    /// not visible is a stub, and only links from visible pages and notes count.
+    pub fn totals(&self, visibility: Visibility<'_>) -> Result<Totals> {
         let conn = self.conn();
         let count = |sql: &str| -> Result<u32> { Ok(conn.query_row(sql, [], |row| row.get(0))?) };
+        let keys = visibility.resolved_keys();
+        let pages = visibility.pages("id");
+        let notes = visibility.notes("id");
+        let link_sources = visibility.pages("source_page_id");
+        let note_links = visibility.notes("note_id");
         Ok(Totals {
-            pages: count("SELECT count(*) FROM page")?,
+            pages: count(&format!("SELECT count(*) FROM page WHERE {pages}"))?,
             stubs: count(&format!(
                 "SELECT count(DISTINCT target_key) FROM \
-                   (SELECT target_key FROM link UNION ALL SELECT target_key FROM note_link) \
-                 WHERE target_key NOT IN (SELECT key FROM ({RESOLVED_KEYS}))"
+                   (SELECT target_key FROM link WHERE {link_sources} \
+                    UNION ALL SELECT target_key FROM note_link WHERE {note_links}) \
+                 WHERE target_key NOT IN (SELECT key FROM ({keys}))"
             ))?,
             links: count(&format!(
-                "SELECT count(*) FROM link l LEFT JOIN ({RESOLVED_KEYS}) k ON k.key = l.target_key \
-                 WHERE k.page_id IS NOT l.source_page_id"
-            ))? + count("SELECT count(*) FROM note_link")?,
-            notes: count("SELECT count(*) FROM note")?,
-            revisions: count("SELECT count(*) FROM revision")?,
+                "SELECT count(*) FROM link l LEFT JOIN ({keys}) k ON k.key = l.target_key \
+                 WHERE k.page_id IS NOT l.source_page_id AND {}",
+                visibility.pages("l.source_page_id")
+            ))? + count(&format!(
+                "SELECT count(*) FROM note_link WHERE {note_links}"
+            ))?,
+            notes: count(&format!("SELECT count(*) FROM note WHERE {notes}"))?,
+            revisions: count(&format!(
+                "SELECT count(*) FROM revision WHERE {}",
+                visibility.pages("page_id")
+            ))?,
         })
     }
 
-    /// The number of pages and notes at the end of every week, from the week of the first one
-    /// written to the current week; empty if there are none. Deleted pages and notes are not
-    /// counted in any week.
-    pub fn weekly_growth(&self) -> Result<Vec<Week>> {
-        self.weekly_growth_until("now")
+    /// The number of visible pages and notes at the end of every week, from the week of the
+    /// first one written to the current week; empty if there are none. Deleted pages and notes
+    /// are not counted in any week.
+    pub fn weekly_growth(&self, visibility: Visibility<'_>) -> Result<Vec<Week>> {
+        self.weekly_growth_until("now", visibility)
     }
 
     /// [`Knowledge::weekly_growth`] up to the week of `until` (an SQLite date such as `now`).
-    pub(crate) fn weekly_growth_until(&self, until: &str) -> Result<Vec<Week>> {
+    pub(crate) fn weekly_growth_until(
+        &self,
+        until: &str,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<Week>> {
         let conn = self.conn();
         // A week is named by its Monday: the date moved to the next Sunday (or kept, if it is
         // one), minus six days.
-        let mut query = conn.prepare(
+        let mut query = conn.prepare(&format!(
             "WITH RECURSIVE \
                item (week, page, note) AS ( \
-                 SELECT date(created_at, 'weekday 0', '-6 days'), 1, 0 FROM page \
+                 SELECT date(created_at, 'weekday 0', '-6 days'), 1, 0 FROM page WHERE {} \
                  UNION ALL \
-                 SELECT date(created_at, 'weekday 0', '-6 days'), 0, 1 FROM note), \
+                 SELECT date(created_at, 'weekday 0', '-6 days'), 0, 1 FROM note WHERE {}), \
                last (until) AS (SELECT date(?1, 'weekday 0', '-6 days')), \
                weeks (week) AS ( \
                  SELECT min(week) FROM item \
@@ -137,7 +167,9 @@ impl Knowledge {
                (SELECT count(*) FROM item WHERE item.week <= w.week AND page = 1), \
                (SELECT count(*) FROM item WHERE item.week <= w.week AND note = 1) \
              FROM weeks w WHERE w.week IS NOT NULL ORDER BY w.week",
-        )?;
+            visibility.pages("id"),
+            visibility.notes("id")
+        ))?;
         let weeks = query
             .query_map([until], |row| {
                 Ok(Week {
@@ -150,10 +182,14 @@ impl Knowledge {
         Ok(weeks)
     }
 
-    /// The pages linked with the most other pages and stubs, in either direction, most-linked
-    /// first; at most `limit`, and only pages with links.
-    pub fn most_linked_pages(&self, limit: usize) -> Result<Vec<GraphNode>> {
-        let graph = self.wiki_graph(&[], usize::MAX)?;
+    /// The visible pages linked with the most other pages and stubs, in either direction,
+    /// most-linked first; at most `limit`, and only pages with links.
+    pub fn most_linked_pages(
+        &self,
+        limit: usize,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<GraphNode>> {
+        let graph = self.wiki_graph(&[], usize::MAX, visibility)?;
         Ok(graph
             .nodes
             .into_iter()
@@ -162,10 +198,10 @@ impl Knowledge {
             .collect())
     }
 
-    /// Pages without links to other pages or stubs and without links from other pages, by
-    /// title. Notes linking to them do not count.
-    pub fn orphaned_pages(&self) -> Result<Vec<GraphNode>> {
-        let graph = self.wiki_graph(&[], usize::MAX)?;
+    /// Visible pages without links to other pages or stubs and without links from other
+    /// visible pages, by title. Notes linking to them do not count.
+    pub fn orphaned_pages(&self, visibility: Visibility<'_>) -> Result<Vec<GraphNode>> {
+        let graph = self.wiki_graph(&[], usize::MAX, visibility)?;
         let mut orphans: Vec<_> = graph
             .nodes
             .into_iter()

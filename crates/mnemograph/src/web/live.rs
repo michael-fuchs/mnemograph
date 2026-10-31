@@ -16,6 +16,7 @@ use mnemograph_core::Session;
 use serde::Deserialize;
 
 use super::WebState;
+use super::spheres::SphereFilter;
 
 /// Writes that arrive within this time after another one cause a single update.
 const COALESCE: Duration = Duration::from_millis(200);
@@ -76,6 +77,7 @@ pub struct LiveQuery {
 pub async fn live(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     Query(query): Query<LiveQuery>,
 ) -> Response {
     let Some(view) = View::parse(&query.view) else {
@@ -85,13 +87,16 @@ pub async fn live(
     changes.mark_unchanged();
     let shutdown = state.shutdown.clone();
     let updates = stream::unfold(
-        (changes, state, session, view),
-        |(mut changes, state, session, view)| async move {
+        (changes, state, session, filter, view),
+        |(mut changes, state, session, filter, view)| async move {
             changes.changed().await.ok()?;
             tokio::time::sleep(COALESCE).await;
             changes.mark_unchanged();
-            let events = render_events(&state, &session, &view).await;
-            Some((stream::iter(events), (changes, state, session, view)))
+            let events = render_events(&state, &session, &filter, &view).await;
+            Some((
+                stream::iter(events),
+                (changes, state, session, filter, view),
+            ))
         },
     )
     .flatten()
@@ -102,16 +107,25 @@ pub async fn live(
         .into_response()
 }
 
-/// Renders the view again and returns the events that update it in the browser.
-async fn render_events(state: &Arc<WebState>, session: &Session, view: &View) -> Vec<Event> {
+/// Renders the view again, with the owner's sphere filter, and returns the events that update
+/// it in the browser.
+async fn render_events(
+    state: &Arc<WebState>,
+    session: &Session,
+    filter: &SphereFilter,
+    view: &View,
+) -> Vec<Event> {
     let state = State(state.clone());
     let session = Extension(session.clone());
+    let filter = filter.clone();
     let response = match view {
-        View::Index => super::index(state, session).await,
-        View::Page(title) => super::page(state, session, Path(title.clone())).await,
-        View::History(title) => super::history(state, session, Path(title.clone())).await,
-        View::Graph(query) => super::graph(state, session, RawQuery(Some(query.clone()))).await,
-        View::Stats => super::stats(state, session).await,
+        View::Index => super::index(state, session, filter).await,
+        View::Page(title) => super::page(state, session, filter, Path(title.clone())).await,
+        View::History(title) => super::history(state, session, filter, Path(title.clone())).await,
+        View::Graph(query) => {
+            super::graph(state, session, filter, RawQuery(Some(query.clone()))).await
+        }
+        View::Stats => super::stats(state, session, filter).await,
     };
     if response.status() != StatusCode::OK {
         // The page was renamed or deleted; a reload shows where it went.

@@ -326,7 +326,7 @@ pub async fn logout(State(state): State<Arc<WebState>>, headers: HeaderMap) -> R
 }
 
 /// Only local paths are allowed as targets after the login (no open redirect).
-fn safe_next(next: Option<&str>) -> String {
+pub(super) fn safe_next(next: Option<&str>) -> String {
     match next {
         Some(next) if next.starts_with('/') && !next.starts_with("//") && !next.contains('\\') => {
             next.to_owned()
@@ -341,7 +341,7 @@ fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -352,7 +352,12 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, value)| value.to_owned())
 }
 
-fn cookie_header(name: &str, value: &str, max_age: Duration, secure: bool) -> HeaderValue {
+pub(super) fn cookie_header(
+    name: &str,
+    value: &str,
+    max_age: Duration,
+    secure: bool,
+) -> HeaderValue {
     let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
         "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",

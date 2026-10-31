@@ -16,6 +16,17 @@
     <form class="search" method="get" action="/search" role="search">
       <input type="search" name="q" value="{{ header.query }}" placeholder="Search pages and notes" aria-label="Search">
     </form>
+    {% if !header.spheres.is_empty() %}
+    <details class="sphere-filter{% if header.filtered %} active{% endif %}">
+      <summary>Spheres: {{ header.sphere_summary }}</summary>
+      <form method="get" action="/spheres">
+        {% for choice in header.spheres %}
+        <label><input type="checkbox" name="sphere" value="{{ choice.name }}"{% if choice.checked %} checked{% endif %}> {{ choice.name }}</label>
+        {% endfor %}
+        <span class="actions"><button type="submit">Show</button>{% if header.filtered %} <a href="/spheres">Show all</a>{% endif %}</span>
+      </form>
+    </details>
+    {% endif %}
     {% if let Some(owner) = header.owner_name %}
     <form class="session" method="post" action="/logout">
       <span>{{ owner }}</span>

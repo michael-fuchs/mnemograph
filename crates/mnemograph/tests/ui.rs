@@ -98,6 +98,19 @@ impl Ui {
         let response = reqwest::get(format!("{}{path}", self.base)).await.unwrap();
         (response.status().as_u16(), response.text().await.unwrap())
     }
+
+    /// Fetches a page with the sphere filter's cookie set to `spheres` (names joined by `.`).
+    async fn html_in(&self, path: &str, spheres: &str) -> String {
+        reqwest::Client::new()
+            .get(format!("{}{path}", self.base))
+            .header("cookie", format!("mnemograph_spheres={spheres}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    }
 }
 
 impl Drop for Ui {
@@ -655,4 +668,190 @@ fn backdate_access_log(db: &std::path::Path) {
         [],
     )
     .unwrap();
+}
+
+/// Two pages and notes in work, one of each in private, with a link from work to private.
+async fn two_spheres() -> Ui {
+    let ui = Ui::start_full(mnemograph::web::DEFAULT_GRAPH_NODES, &["private", "work"]).await;
+    for (tool, args) in [
+        (
+            "write_page",
+            json!({ "title": "Setup", "body": "The office by the sea, see [[Rust]] and [[Holidays]].", "sphere": "work" }),
+        ),
+        (
+            "write_page",
+            json!({ "title": "Rust", "body": "", "sphere": "work" }),
+        ),
+        (
+            "write_page",
+            json!({ "title": "Holidays", "body": "A trip to the sea.", "sphere": "private" }),
+        ),
+        (
+            "add_note",
+            json!({ "body": "Desk by the window.", "sphere": "work" }),
+        ),
+        (
+            "add_note",
+            json!({ "body": "Booked the ferry.", "sphere": "private" }),
+        ),
+    ] {
+        ui.call(tool, args).await;
+    }
+    ui
+}
+
+#[tokio::test]
+async fn pages_notes_and_hits_show_their_spheres() {
+    let ui = two_spheres().await;
+    let (_, index) = ui.html("/").await;
+    assert!(index.contains("<summary>Spheres: all</summary>"), "{index}");
+    assert!(
+        index.contains("<span class=\"sphere\">private</span>")
+            && index.contains("<span class=\"sphere\">work</span>"),
+        "{index}"
+    );
+    let (_, page) = ui.html("/pages/Holidays").await;
+    assert!(
+        page.contains("<span class=\"sphere\">private</span>"),
+        "{page}"
+    );
+    let (_, hits) = ui.html("/search?q=sea").await;
+    assert!(
+        hits.contains("Setup") && hits.contains("Holidays") && hits.contains("class=\"sphere\""),
+        "{hits}"
+    );
+    let (_, graph) = ui.html("/graph").await;
+    let graph = graph_data(&graph).unwrap();
+    let setup = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["label"] == "Setup")
+        .unwrap();
+    assert_eq!(setup["spheres"], json!(["work"]));
+}
+
+#[tokio::test]
+async fn the_sphere_filter_limits_the_page_list_search_graph_and_statistics() {
+    let ui = two_spheres().await;
+
+    let index = ui.html_in("/", "work").await;
+    assert!(
+        index.contains("<summary>Spheres: work</summary>"),
+        "{index}"
+    );
+    assert!(
+        index.contains("value=\"work\" checked") && !index.contains("value=\"private\" checked"),
+        "{index}"
+    );
+    assert!(
+        index.contains(">Setup</a>") && !index.contains(">Holidays</a>"),
+        "{index}"
+    );
+    assert!(
+        index.contains("Desk by the window") && !index.contains("ferry"),
+        "{index}"
+    );
+
+    let hits = ui.html_in("/search?q=sea", "private").await;
+    assert!(
+        hits.contains(">Holidays</a>") && !hits.contains(">Setup</a>"),
+        "{hits}"
+    );
+    let none = ui.html_in("/search?q=ferry", "work").await;
+    assert!(
+        none.contains("Nothing found in the spheres work."),
+        "{none}"
+    );
+
+    let graph = graph_data(&ui.html_in("/graph", "work").await).unwrap();
+    let mut labels = graph_labels(&graph);
+    labels.sort();
+    assert_eq!(labels, ["Holidays", "Rust", "Setup"]);
+    let holidays = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["label"] == "Holidays")
+        .unwrap();
+    assert_eq!(holidays["stub"], true, "a page of another sphere is a stub");
+
+    let stats = ui.html_in("/stats", "work").await;
+    assert_eq!(total(&stats, "pages"), 2);
+    assert_eq!(total(&stats, "notes"), 1);
+    assert!(stats.contains("Only the spheres work"), "{stats}");
+    let (_, all) = ui.html("/stats").await;
+    assert_eq!(total(&all, "pages"), 3);
+    assert_eq!(total(&all, "notes"), 2);
+
+    // Both spheres together show everything again.
+    let both = ui.html_in("/", "private.work").await;
+    assert!(both.contains(">Holidays</a>") && both.contains(">Setup</a>"));
+    // A page itself is always shown, whatever the filter.
+    let page = ui.html_in("/pages/Holidays", "work").await;
+    assert!(page.contains("A trip to the sea."), "{page}");
+}
+
+#[tokio::test]
+async fn choosing_spheres_keeps_the_choice_and_returns_to_the_page() {
+    let ui = two_spheres().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let choose = |query: &'static str| {
+        client
+            .get(format!("{}/spheres{query}", ui.base))
+            .header("referer", format!("{}/search?q=sea", ui.base))
+            .send()
+    };
+
+    let chosen = choose("?sphere=work&sphere=Not%20valid").await.unwrap();
+    assert!(chosen.status().is_redirection());
+    assert_eq!(chosen.headers()["location"], "/search?q=sea");
+    let cookie = chosen.headers()["set-cookie"].to_str().unwrap();
+    assert!(cookie.starts_with("mnemograph_spheres=work;"), "{cookie}");
+
+    let cleared = choose("").await.unwrap();
+    let cookie = cleared.headers()["set-cookie"].to_str().unwrap();
+    assert!(
+        cookie.starts_with("mnemograph_spheres=;") && cookie.contains("Max-Age=0"),
+        "{cookie}"
+    );
+}
+
+#[tokio::test]
+async fn live_updates_keep_the_sphere_filter() {
+    let ui = two_spheres().await;
+    let mut stream = reqwest::Client::new()
+        .get(format!("{}/live?view=%2F", ui.base))
+        .header("cookie", "mnemograph_spheres=work")
+        .send()
+        .await
+        .unwrap();
+    ui.call(
+        "write_page",
+        json!({ "title": "Secret", "body": "", "sphere": "private" }),
+    )
+    .await;
+    ui.call(
+        "write_page",
+        json!({ "title": "Cargo", "body": "", "sphere": "work" }),
+    )
+    .await;
+
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut text = String::new();
+        while !(text.contains(">Cargo</a>") && text.contains("</main>")) {
+            let chunk = stream.chunk().await.unwrap().expect("stream ended");
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        text
+    })
+    .await
+    .expect("no update within 5 seconds");
+    assert!(
+        !received.contains(">Secret</a>") && !received.contains(">Holidays</a>"),
+        "{received}"
+    );
 }

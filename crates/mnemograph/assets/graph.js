@@ -100,6 +100,8 @@ class MnemoGraph extends HTMLElement {
         data: {
           ...n,
           id: n.url,
+          // Pointing at a page shows its spheres with its title.
+          hoverLabel: n.spheres && n.spheres.length ? `${n.label} · ${n.spheres.join(", ")}` : n.label,
           fill: n.color == null ? cssColor(css, "--bg") : cssColor(css, `--type-${n.color}`),
           weight: weight(n),
           font: 11 + 5 * weight(n),
@@ -274,7 +276,7 @@ function style(css) {
     {
       selector: "node.hover",
       style: {
-        label: "data(label)",
+        label: "data(hoverLabel)",
         "z-index": 10,
         "text-background-color": color("--bg"),
         "text-background-opacity": 0.85,

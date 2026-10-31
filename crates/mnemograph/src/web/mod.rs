@@ -6,6 +6,7 @@ mod chart;
 mod live;
 pub mod login;
 pub mod render;
+mod spheres;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use login::{LoginSettings, PendingLogins};
 use render::{page_url, render};
+use spheres::SphereFilter;
 
 /// How many recent notes the start page and a page show.
 const RECENT_NOTES: u32 = 20;
@@ -80,6 +82,7 @@ pub fn router(
         .route("/pages/{title}/history", get(history))
         .route("/pages/{title}/revisions/{number}", get(revision))
         .route("/live", get(live::live))
+        .route("/spheres", get(spheres::choose))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             login::require_owner,
@@ -106,6 +109,16 @@ struct Header {
     query: String,
     /// The view's path, if it updates itself when agents write.
     live: Option<String>,
+    /// The spheres the owner can filter by; empty hides the filter.
+    spheres: Vec<SphereChoice>,
+    /// The chosen spheres, e.g. "work", or "all".
+    sphere_summary: String,
+    filtered: bool,
+}
+
+struct SphereChoice {
+    name: String,
+    checked: bool,
 }
 
 impl Header {
@@ -114,7 +127,28 @@ impl Header {
             owner_name: state.login.as_ref().map(|_| session.owner_name.clone()),
             query: String::new(),
             live: None,
+            spheres: Vec::new(),
+            sphere_summary: String::new(),
+            filtered: false,
         }
+    }
+
+    /// Shows the sphere filter with the spheres in use and the owner's choice.
+    fn spheres(mut self, state: &WebState, filter: &SphereFilter) -> Self {
+        let in_use = state.knowledge.spheres_in_use().unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not list the spheres");
+            Vec::new()
+        });
+        self.spheres = in_use
+            .into_iter()
+            .map(|name| SphereChoice {
+                checked: filter.contains(&name),
+                name,
+            })
+            .collect();
+        self.sphere_summary = filter.summary();
+        self.filtered = filter.is_active();
+        self
     }
 
     /// A header without a session, for the login flow's pages.
@@ -123,6 +157,9 @@ impl Header {
             owner_name: None,
             query: String::new(),
             live: None,
+            spheres: Vec::new(),
+            sphere_summary: String::new(),
+            filtered: false,
         }
     }
 
@@ -145,6 +182,7 @@ struct PageRow {
     title: String,
     url: String,
     page_type: Option<String>,
+    spheres: Vec<String>,
     updated_at: String,
     updated_by: String,
 }
@@ -180,7 +218,8 @@ impl GraphView {
     fn neighborhood(graph: &Neighborhood, page_types: &[String]) -> Self {
         Self::build(
             graph.nodes.iter().map(|node| {
-                let fields = serde_json::json!({ "distance": node.distance });
+                let fields =
+                    serde_json::json!({ "distance": node.distance, "spheres": node.spheres });
                 (&node.title, node.page_type.as_deref(), node.stub, fields)
             }),
             &graph.edges,
@@ -192,7 +231,7 @@ impl GraphView {
     fn wiki(graph: &WikiGraph, page_types: &[String]) -> Self {
         Self::build(
             graph.nodes.iter().map(|node| {
-                let fields = serde_json::json!({ "degree": node.degree });
+                let fields = serde_json::json!({ "degree": node.degree, "spheres": node.spheres });
                 (&node.title, node.page_type.as_deref(), node.stub, fields)
             }),
             &graph.edges,
@@ -257,6 +296,7 @@ struct NoteItem {
     id: i64,
     created_at: String,
     author: String,
+    spheres: Vec<String>,
     html: String,
 }
 
@@ -277,6 +317,7 @@ struct PageTemplate {
     url: String,
     page_type: Option<String>,
     aliases: Vec<String>,
+    spheres: Vec<String>,
     revision: u32,
     created_at: String,
     updated_at: String,
@@ -306,6 +347,7 @@ struct HitItem {
     title: String,
     url: String,
     page_type: Option<String>,
+    spheres: Vec<String>,
     meta: String,
     snippet_html: String,
 }
@@ -447,11 +489,16 @@ struct MessageTemplate {
 async fn index(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
 ) -> Response {
     let knowledge = state.knowledge.clone();
+    let shown = filter.clone();
     let loaded = tokio::task::spawn_blocking(move || {
-        let pages = knowledge.pages()?;
+        let visibility = shown.visibility();
+        let mut pages = knowledge.pages()?;
+        pages.retain(|page| visibility.sees(&page.spheres));
         let mut notes = knowledge.notes()?;
+        notes.retain(|note| visibility.sees(&note.spheres));
         notes.reverse();
         notes.truncate(RECENT_NOTES as usize);
         let stubs = stub_keys_of_notes(&notes);
@@ -463,11 +510,14 @@ async fn index(
     };
     let (notes, has_mermaid) = note_items(notes, &stubs);
     IndexTemplate {
-        header: Header::new(&state, &session).live("/".to_owned()),
+        header: Header::new(&state, &session)
+            .live("/".to_owned())
+            .spheres(&state, &filter),
         pages: pages
             .into_iter()
             .map(|page| PageRow {
                 url: page_url(&page.title),
+                spheres: page.spheres,
                 updated_by: author_label(page.author.as_ref()),
                 updated_at: timestamp(&page.updated_at),
                 page_type: page.page_type,
@@ -483,6 +533,7 @@ async fn index(
 async fn page(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     Path(title): Path<String>,
 ) -> Response {
     let knowledge = state.knowledge.clone();
@@ -508,7 +559,7 @@ async fn page(
     let graph = graph
         .map(|graph| GraphView::neighborhood(&graph, state.knowledge.page_types()))
         .unwrap_or_else(GraphView::empty);
-    let header = Header::new(&state, &session);
+    let header = Header::new(&state, &session).spheres(&state, &filter);
     let backlinks = links
         .backlinks
         .iter()
@@ -574,6 +625,7 @@ async fn page(
         title: page.title,
         page_type: page.page_type,
         aliases: page.aliases,
+        spheres: page.spheres,
         revision: page.revision,
         created_at: timestamp(&page.created_at),
         updated_at: timestamp(&page.updated_at),
@@ -586,21 +638,24 @@ async fn page(
 async fn stats(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
 ) -> Response {
     let knowledge = state.knowledge.clone();
+    let shown = filter.clone();
     let loaded = tokio::task::spawn_blocking(move || {
+        let v = shown.visibility();
         Ok::<_, mnemograph_core::Error>((
-            knowledge.totals()?,
-            knowledge.weekly_growth()?,
-            knowledge.most_linked_pages(MOST_LINKED)?,
-            knowledge.orphaned_pages()?,
-            knowledge.author_activity()?,
-            knowledge.weekly_activity()?,
+            knowledge.totals(v)?,
+            knowledge.weekly_growth(v)?,
+            knowledge.most_linked_pages(MOST_LINKED, v)?,
+            knowledge.orphaned_pages(v)?,
+            knowledge.author_activity(v)?,
+            knowledge.weekly_activity(v)?,
             (
-                knowledge.agent_access()?,
-                knowledge.weekly_access()?,
-                knowledge.most_read_pages(MOST_LINKED, Visibility::All)?,
-                knowledge.knowledge_gaps(KNOWLEDGE_GAPS, Visibility::All)?,
+                knowledge.agent_access(v)?,
+                knowledge.weekly_access(v)?,
+                knowledge.most_read_pages(MOST_LINKED, v)?,
+                knowledge.knowledge_gaps(KNOWLEDGE_GAPS, v)?,
             ),
         ))
     })
@@ -642,7 +697,9 @@ async fn stats(
         "Reads, searches and explorations per week by agent",
     );
     StatsTemplate {
-        header: Header::new(&state, &session).live("/stats".to_owned()),
+        header: Header::new(&state, &session)
+            .live("/stats".to_owned())
+            .spheres(&state, &filter),
         totals,
         growth_html,
         activity_html,
@@ -735,15 +792,19 @@ fn per_author_chart(
 async fn graph(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     RawQuery(query): RawQuery,
 ) -> Response {
     let page_types = state.knowledge.page_types().to_vec();
     let chosen = chosen_types(query.as_deref().unwrap_or(""), &page_types);
     let knowledge = state.knowledge.clone();
     let max_nodes = state.graph_max_nodes;
-    let filter = chosen.clone();
-    let loaded =
-        tokio::task::spawn_blocking(move || knowledge.wiki_graph(&filter, max_nodes)).await;
+    let types = chosen.clone();
+    let shown = filter.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        knowledge.wiki_graph(&types, max_nodes, shown.visibility())
+    })
+    .await;
     let Ok(Ok(graph)) = loaded else {
         return internal_error(&state, &session);
     };
@@ -752,7 +813,9 @@ async fn graph(
         query => format!("/graph?{query}"),
     };
     GraphTemplate {
-        header: Header::new(&state, &session).live(view),
+        header: Header::new(&state, &session)
+            .live(view)
+            .spheres(&state, &filter),
         types: page_types
             .iter()
             .enumerate()
@@ -814,9 +877,10 @@ struct SearchQuery {
 async fn search(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     Query(query): Query<SearchQuery>,
 ) -> Response {
-    let mut header = Header::new(&state, &session);
+    let mut header = Header::new(&state, &session).spheres(&state, &filter);
     header.query = query.q.trim().to_owned();
     let page_type = query.page_type.trim().to_owned();
     let mut template = SearchTemplate {
@@ -833,9 +897,10 @@ async fn search(
     }
     let knowledge = state.knowledge.clone();
     let text = query.q.clone();
+    let shown = filter.clone();
     let found = tokio::task::spawn_blocking(move || {
         let page_type = Some(page_type).filter(|t| !t.is_empty());
-        knowledge.search(&text, page_type.as_deref(), SEARCH_HITS, Visibility::All)
+        knowledge.search(&text, page_type.as_deref(), SEARCH_HITS, shown.visibility())
     })
     .await;
     match found {
@@ -845,11 +910,16 @@ async fn search(
                 .map(|hit| {
                     let snippet_html = snippet_html(&hit.snippet);
                     match hit.found {
-                        Found::Page { title, page_type } => HitItem {
+                        Found::Page {
+                            title,
+                            page_type,
+                            spheres,
+                        } => HitItem {
                             kind: "page",
                             url: page_url(&title),
                             title,
                             page_type,
+                            spheres,
                             meta: String::new(),
                             snippet_html,
                         },
@@ -858,6 +928,7 @@ async fn search(
                             url: format!("/#note-{}", note.id),
                             title: format!("Note #{}", note.id),
                             page_type: None,
+                            spheres: note.spheres.clone(),
                             meta: format!(
                                 "{} · {}",
                                 timestamp(&note.created_at),
@@ -878,6 +949,7 @@ async fn search(
 async fn history(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     Path(title): Path<String>,
 ) -> Response {
     let knowledge = state.knowledge.clone();
@@ -886,7 +958,7 @@ async fn history(
     let Ok(Ok(revisions)) = loaded else {
         return internal_error(&state, &session);
     };
-    let header = Header::new(&state, &session);
+    let header = Header::new(&state, &session).spheres(&state, &filter);
     let Some(revisions) = revisions.filter(|r| !r.is_empty()) else {
         return message(
             StatusCode::NOT_FOUND,
@@ -934,6 +1006,7 @@ async fn history(
 async fn revision(
     State(state): State<Arc<WebState>>,
     Extension(session): Extension<Session>,
+    filter: SphereFilter,
     Path((title, number)): Path<(String, u32)>,
 ) -> Response {
     let knowledge = state.knowledge.clone();
@@ -948,7 +1021,7 @@ async fn revision(
     let Ok(Ok((current, revision))) = loaded else {
         return internal_error(&state, &session);
     };
-    let header = Header::new(&state, &session);
+    let header = Header::new(&state, &session).spheres(&state, &filter);
     let (Some(current), Some(revision)) = (current, revision) else {
         return message(
             StatusCode::NOT_FOUND,
@@ -1081,6 +1154,7 @@ fn note_items(notes: Vec<Note>, stubs: &HashSet<String>) -> (Vec<NoteItem>, bool
                 id: note.id,
                 created_at: timestamp(&note.created_at),
                 author: author_label(note.author.as_ref()),
+                spheres: note.spheres,
                 html: rendered.html,
             }
         })

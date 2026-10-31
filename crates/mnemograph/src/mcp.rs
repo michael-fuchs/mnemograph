@@ -244,6 +244,8 @@ pub enum HitView {
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         page_type: Option<String>,
+        /// The spheres the page belongs to.
+        spheres: Vec<String>,
         /// The matching part of the page, with matched words in **bold**.
         snippet: String,
     },
@@ -257,9 +259,14 @@ pub enum HitView {
 impl From<SearchHit> for HitView {
     fn from(hit: SearchHit) -> Self {
         match hit.found {
-            Found::Page { title, page_type } => HitView::Page {
+            Found::Page {
                 title,
                 page_type,
+                spheres,
+            } => HitView::Page {
+                title,
+                page_type,
+                spheres,
                 snippet: hit.snippet,
             },
             Found::Note(note) => HitView::Note {

@@ -947,7 +947,7 @@ fn the_neighborhood_resolves_aliases_and_starts_from_stubs() {
 /// number of hidden nodes.
 fn wiki_graph(knowledge: &Knowledge, page_types: &[&str], max_nodes: usize) -> (Graph, usize) {
     let types: Vec<String> = page_types.iter().map(|t| t.to_string()).collect();
-    let graph = knowledge.wiki_graph(&types, max_nodes).unwrap();
+    let graph = knowledge.wiki_graph(&types, max_nodes, ALL).unwrap();
     let title_of = |i: usize| graph.nodes[i].title.clone();
     let mut edges: Vec<_> = graph
         .edges
@@ -1617,7 +1617,7 @@ fn created_at(knowledge: &Knowledge, table: &str, key: &str, at: &str) {
 #[test]
 fn totals_count_pages_stubs_links_notes_and_revisions() {
     let knowledge = knowledge();
-    assert_eq!(knowledge.totals().unwrap(), Totals::default());
+    assert_eq!(knowledge.totals(ALL).unwrap(), Totals::default());
 
     create(&knowledge, "Rust", "[[Rust]] [[Cargo]]");
     let mnemograph = create(&knowledge, "mnemograph", "[[Rust]]");
@@ -1633,7 +1633,7 @@ fn totals_count_pages_stubs_links_notes_and_revisions() {
         .unwrap();
 
     assert_eq!(
-        knowledge.totals().unwrap(),
+        knowledge.totals(ALL).unwrap(),
         Totals {
             pages: 2,
             // Cargo and Tantivy from pages, Caddy from the note.
@@ -1651,7 +1651,7 @@ fn weekly_growth_counts_pages_and_notes_up_to_each_week() {
     let knowledge = knowledge();
     assert!(
         knowledge
-            .weekly_growth_until("2026-10-29")
+            .weekly_growth_until("2026-10-29", ALL)
             .unwrap()
             .is_empty()
     );
@@ -1670,7 +1670,7 @@ fn weekly_growth_counts_pages_and_notes_up_to_each_week() {
     );
     created_at(&knowledge, "page", "B", "2026-10-19T00:00:00.000Z");
 
-    let weeks = knowledge.weekly_growth_until("2026-10-29").unwrap();
+    let weeks = knowledge.weekly_growth_until("2026-10-29", ALL).unwrap();
     let summary: Vec<_> = weeks
         .iter()
         .map(|w| (w.start.as_str(), w.pages, w.notes))
@@ -1690,7 +1690,7 @@ fn weekly_growth_counts_pages_and_notes_up_to_each_week() {
 fn a_wiki_only_days_old_has_one_week() {
     let knowledge = knowledge();
     create(&knowledge, "A", "");
-    let weeks = knowledge.weekly_growth().unwrap();
+    let weeks = knowledge.weekly_growth(ALL).unwrap();
     assert_eq!(weeks.len(), 1);
     assert_eq!((weeks[0].pages, weeks[0].notes), (1, 0));
 }
@@ -1706,7 +1706,7 @@ fn most_linked_and_orphaned_pages() {
     knowledge.add_note("[[zeta]]", None, &writer()).unwrap();
 
     let most: Vec<_> = knowledge
-        .most_linked_pages(2)
+        .most_linked_pages(2, ALL)
         .unwrap()
         .into_iter()
         .map(|n| (n.title, n.degree))
@@ -1714,7 +1714,7 @@ fn most_linked_and_orphaned_pages() {
     assert_eq!(most, [("Hub".to_owned(), 3), ("A".to_owned(), 2)]);
     // A link to itself and a note's link do not connect a page.
     let orphans: Vec<_> = knowledge
-        .orphaned_pages()
+        .orphaned_pages(ALL)
         .unwrap()
         .into_iter()
         .map(|n| n.title)
@@ -1725,9 +1725,9 @@ fn most_linked_and_orphaned_pages() {
 #[test]
 fn activity_per_author_counts_revisions_and_notes() {
     let knowledge = knowledge();
-    assert!(knowledge.author_activity().unwrap().is_empty());
+    assert!(knowledge.author_activity(ALL).unwrap().is_empty());
     assert_eq!(
-        knowledge.weekly_activity_until("2026-10-29").unwrap(),
+        knowledge.weekly_activity_until("2026-10-29", ALL).unwrap(),
         WeeklyActivity::default()
     );
 
@@ -1794,7 +1794,7 @@ fn activity_per_author_counts_revisions_and_notes() {
         .unwrap();
 
     let activity: Vec<_> = knowledge
-        .author_activity()
+        .author_activity(ALL)
         .unwrap()
         .into_iter()
         .map(|a| (a.author, a.revisions, a.notes, a.first, a.last))
@@ -1826,7 +1826,7 @@ fn activity_per_author_counts_revisions_and_notes() {
         ]
     );
 
-    let weekly = knowledge.weekly_activity_until("2026-11-04").unwrap();
+    let weekly = knowledge.weekly_activity_until("2026-11-04", ALL).unwrap();
     assert_eq!(
         weekly.weeks,
         ["2026-10-12", "2026-10-19", "2026-10-26", "2026-11-02"]
@@ -1907,7 +1907,7 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
     knowledge.delete_page("Gone").unwrap();
 
     let agents: Vec<_> = knowledge
-        .agent_access()
+        .agent_access(ALL)
         .unwrap()
         .into_iter()
         .map(|a| (a.author.unwrap(), a.reads, a.searches, a.related))
@@ -1940,7 +1940,7 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
         ]
     );
 
-    let weekly = knowledge.weekly_access().unwrap();
+    let weekly = knowledge.weekly_access(ALL).unwrap();
     assert_eq!(weekly.weeks.len(), 1);
     assert_eq!(
         weekly.authors,
@@ -2768,5 +2768,110 @@ fn the_upgrade_gives_existing_revisions_their_pages_spheres() {
     assert_eq!(
         knowledge.page("Old", ALL).unwrap().unwrap().spheres,
         ["private", "work"]
+    );
+}
+
+#[test]
+fn the_wiki_graph_and_statistics_can_be_limited_to_spheres() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Setup", "[[Holidays]] and [[Rust]].");
+    create_in(&knowledge, "work", "Rust", "");
+    create_in(
+        &knowledge,
+        "private",
+        "Holidays",
+        "[[Beach]] and [[Setup]].",
+    );
+    knowledge
+        .add_note("Booked the [[Holidays]].", None, &writer_in(&["private"]))
+        .unwrap();
+    knowledge
+        .add_note("[[Rust]] 2.0.", None, &writer_in(&["work"]))
+        .unwrap();
+    let agent = author();
+    knowledge
+        .record_access(&agent, &spheres(&["work"]), Access::Search, "kubernetes", 0)
+        .unwrap();
+    knowledge
+        .record_access(
+            &agent,
+            &spheres(&["private"]),
+            Access::ReadPage,
+            "Holidays",
+            1,
+        )
+        .unwrap();
+    let work = spheres(&["work"]);
+    let work = Visibility::Within(&work);
+
+    assert_eq!(knowledge.spheres_in_use().unwrap(), ["private", "work"]);
+    assert_eq!(
+        knowledge.totals(work).unwrap(),
+        Totals {
+            pages: 2,
+            stubs: 1, // Holidays, which work cannot see
+            links: 3,
+            notes: 1,
+            revisions: 2,
+        }
+    );
+    assert_eq!(
+        knowledge.totals(ALL).unwrap(),
+        Totals {
+            pages: 3,
+            stubs: 1, // Beach
+            links: 6,
+            notes: 2,
+            revisions: 3,
+        }
+    );
+
+    let graph = knowledge.wiki_graph(&[], 100, work).unwrap();
+    let mut nodes: Vec<(&str, bool, Vec<String>)> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.title.as_str(), n.stub, n.spheres.clone()))
+        .collect();
+    nodes.sort();
+    assert_eq!(
+        nodes,
+        [
+            ("Holidays", true, vec![]),
+            ("Rust", false, vec!["work".to_owned()]),
+            ("Setup", false, vec!["work".to_owned()]),
+        ]
+    );
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(knowledge.wiki_graph(&[], 100, ALL).unwrap().nodes.len(), 4);
+
+    let week = knowledge.weekly_growth(work).unwrap().pop().unwrap();
+    assert_eq!((week.pages, week.notes), (2, 1));
+    let activity = knowledge.author_activity(work).unwrap();
+    assert_eq!((activity[0].revisions, activity[0].notes), (2, 1));
+    assert_eq!(
+        knowledge.weekly_activity(work).unwrap().authors[0]
+            .1
+            .iter()
+            .sum::<u32>(),
+        3
+    );
+    let linked: Vec<String> = knowledge
+        .most_linked_pages(10, work)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert_eq!(linked, ["Setup", "Rust"]);
+    assert!(knowledge.orphaned_pages(work).unwrap().is_empty());
+
+    let access = knowledge.agent_access(work).unwrap();
+    assert_eq!((access[0].reads, access[0].searches), (0, 1));
+    assert_eq!(knowledge.agent_access(ALL).unwrap()[0].reads, 1);
+    assert_eq!(
+        knowledge.weekly_access(work).unwrap().authors[0]
+            .1
+            .iter()
+            .sum::<u32>(),
+        1
     );
 }
