@@ -516,3 +516,96 @@ async fn a_registration_with_two_spheres_must_name_one_when_creating() {
     .await;
     assert_eq!(structured(&note)["spheres"], json!(["work"]));
 }
+
+#[tokio::test]
+async fn no_tool_shows_pages_or_notes_of_another_sphere() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let private = server
+        .client_with_scope(&keys, "mnemograph sphere:private")
+        .await;
+    let work = server
+        .client_with_scope(&keys, "mnemograph sphere:work")
+        .await;
+    for (client, tool, args) in [
+        (
+            &private,
+            "write_page",
+            json!({ "title": "Holidays", "body": "A sea trip. See [[Setup]] and [[Beach]]." }),
+        ),
+        (
+            &private,
+            "add_note",
+            json!({ "body": "Booked the [[Holidays]] by the sea." }),
+        ),
+        (
+            &work,
+            "write_page",
+            json!({ "title": "Setup", "body": "The office by the sea, before the [[Holidays]]." }),
+        ),
+        (
+            &work,
+            "add_note",
+            json!({ "body": "Sea level data for [[Setup]]." }),
+        ),
+    ] {
+        structured(&call(client, tool, args).await);
+    }
+
+    let search = call(&work, "search", json!({ "query": "sea" })).await;
+    let mut found: Vec<String> = structured(&search)["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| match hit["kind"].as_str().unwrap() {
+            "page" => hit["title"].as_str().unwrap().to_owned(),
+            _ => hit["note"]["body"].as_str().unwrap().to_owned(),
+        })
+        .collect();
+    found.sort();
+    assert_eq!(found, ["Sea level data for [[Setup]].", "Setup"]);
+
+    let setup = call(&work, "read_page", json!({ "title": "Setup" })).await;
+    let setup = structured(&setup);
+    assert_eq!(
+        setup["links"],
+        json!([{ "title": "Holidays", "stub": true }])
+    );
+    assert_eq!(setup["backlinks"], json!([]));
+    assert_eq!(setup["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(setup["notes"][0]["body"], "Sea level data for [[Setup]].");
+
+    // The hidden page is a stub that reveals only who in this sphere links to it.
+    let holidays = error_text(&call(&work, "read_page", json!({ "title": "Holidays" })).await);
+    assert!(
+        holidays.contains("stub") && holidays.contains("Setup"),
+        "{holidays}"
+    );
+    assert!(
+        !holidays.contains("trip") && !holidays.contains("Booked"),
+        "{holidays}"
+    );
+
+    let related = call(&work, "related", json!({ "title": "Setup", "hops": 3 })).await;
+    assert_eq!(
+        structured(&related)["related"],
+        json!([{ "title": "Holidays", "stub": true, "distance": 1 }])
+    );
+    let beach = error_text(&call(&work, "related", json!({ "title": "Beach" })).await);
+    assert!(beach.contains("no page titled"), "{beach}");
+
+    // The access log records each registration's sphere.
+    let spheres = |name: &str| mnemograph_core::Spheres::new([name]).unwrap();
+    let read_by = |name: &str| {
+        let spheres = spheres(name);
+        server
+            .knowledge
+            .most_read_pages(10, mnemograph_core::Visibility::Within(&spheres))
+            .unwrap()
+            .into_iter()
+            .map(|page| page.title)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read_by("work"), ["Setup"]);
+    assert!(read_by("private").is_empty());
+}

@@ -484,15 +484,16 @@ async fn page(
     let knowledge = state.knowledge.clone();
     let requested = title.clone();
     let loaded = tokio::task::spawn_blocking(move || {
-        let graph = match knowledge.neighborhood(&requested, MAX_HOPS, GRAPH_NODES) {
+        let graph = match knowledge.neighborhood(&requested, MAX_HOPS, GRAPH_NODES, Visibility::All)
+        {
             Ok(graph) => Some(graph),
             Err(mnemograph_core::Error::PageNotFound(_)) => None,
             Err(error) => return Err(error),
         };
         Ok::<_, mnemograph_core::Error>((
             knowledge.page(&requested, Visibility::All)?,
-            knowledge.links(&requested)?,
-            knowledge.notes_about(&requested, RECENT_NOTES)?,
+            knowledge.links(&requested, Visibility::All)?,
+            knowledge.notes_about(&requested, RECENT_NOTES, Visibility::All)?,
             graph,
         ))
     })
@@ -594,8 +595,8 @@ async fn stats(
             (
                 knowledge.agent_access()?,
                 knowledge.weekly_access()?,
-                knowledge.most_read_pages(MOST_LINKED)?,
-                knowledge.knowledge_gaps(KNOWLEDGE_GAPS)?,
+                knowledge.most_read_pages(MOST_LINKED, Visibility::All)?,
+                knowledge.knowledge_gaps(KNOWLEDGE_GAPS, Visibility::All)?,
             ),
         ))
     })
@@ -830,7 +831,7 @@ async fn search(
     let text = query.q.clone();
     let found = tokio::task::spawn_blocking(move || {
         let page_type = Some(page_type).filter(|t| !t.is_empty());
-        knowledge.search(&text, page_type.as_deref(), SEARCH_HITS)
+        knowledge.search(&text, page_type.as_deref(), SEARCH_HITS, Visibility::All)
     })
     .await;
     match found {

@@ -295,10 +295,13 @@ fn rename_keeps_the_old_title_as_alias_and_links_keep_resolving() {
         "Rauthy IdP"
     );
     assert_eq!(
-        knowledge.links("Setup").unwrap().outgoing,
+        knowledge.links("Setup", ALL).unwrap().outgoing,
         [link("Rauthy", Some("Rauthy IdP"))]
     );
-    assert_eq!(knowledge.links("Rauthy IdP").unwrap().backlinks, ["Setup"]);
+    assert_eq!(
+        knowledge.links("Rauthy IdP", ALL).unwrap().backlinks,
+        ["Setup"]
+    );
     assert_eq!(
         knowledge
             .page_revision("Rauthy IdP", 1)
@@ -500,13 +503,16 @@ fn links_are_extracted_and_unwritten_titles_are_stubs() {
         "Written in [[rust]], uses [[Tantivy|a search index]].",
     );
 
-    let outgoing = knowledge.links("mnemograph").unwrap().outgoing;
+    let outgoing = knowledge.links("mnemograph", ALL).unwrap().outgoing;
     assert_eq!(
         outgoing,
         [link("rust", Some("Rust")), link("Tantivy", None)]
     );
     assert!(outgoing[1].is_stub());
-    assert_eq!(knowledge.links("Rust").unwrap().backlinks, ["mnemograph"]);
+    assert_eq!(
+        knowledge.links("Rust", ALL).unwrap().backlinks,
+        ["mnemograph"]
+    );
 }
 
 #[test]
@@ -515,16 +521,16 @@ fn stub_has_backlinks_and_becomes_a_page_when_written() {
     create(&knowledge, "A", "See [[Caddy]].");
     create(&knowledge, "B", "Also [[caddy]].");
 
-    let stub = knowledge.links("CADDY").unwrap();
+    let stub = knowledge.links("CADDY", ALL).unwrap();
     assert!(stub.outgoing.is_empty());
     assert_eq!(stub.backlinks, ["A", "B"]);
 
     create(&knowledge, "Caddy", "A reverse proxy.");
     assert_eq!(
-        knowledge.links("A").unwrap().outgoing,
+        knowledge.links("A", ALL).unwrap().outgoing,
         [link("Caddy", Some("Caddy"))]
     );
-    assert_eq!(knowledge.links("Caddy").unwrap().backlinks, ["A", "B"]);
+    assert_eq!(knowledge.links("Caddy", ALL).unwrap().backlinks, ["A", "B"]);
 }
 
 #[test]
@@ -544,7 +550,7 @@ fn backlinks_include_links_to_aliases() {
         .unwrap();
     create(&knowledge, "A", "[[Rust]]");
     create(&knowledge, "B", "[[rustlang]]");
-    assert_eq!(knowledge.links("Rust").unwrap().backlinks, ["A", "B"]);
+    assert_eq!(knowledge.links("Rust", ALL).unwrap().backlinks, ["A", "B"]);
 }
 
 #[test]
@@ -554,14 +560,14 @@ fn new_revision_replaces_links() {
     update(&knowledge, "Page", "[[Kept]] and [[New]]", 1).unwrap();
 
     let titles: Vec<_> = knowledge
-        .links("Page")
+        .links("Page", ALL)
         .unwrap()
         .outgoing
         .into_iter()
         .map(|l| l.title)
         .collect();
     assert_eq!(titles, ["Kept", "New"]);
-    assert!(knowledge.links("Old").unwrap().backlinks.is_empty());
+    assert!(knowledge.links("Old", ALL).unwrap().backlinks.is_empty());
 }
 
 #[test]
@@ -579,7 +585,7 @@ fn links_to_the_page_itself_or_its_aliases_are_ignored() {
             &writer(),
         )
         .unwrap();
-    assert_eq!(knowledge.links("Rust").unwrap(), Links::default());
+    assert_eq!(knowledge.links("Rust", ALL).unwrap(), Links::default());
 }
 
 // Migrations
@@ -616,7 +622,7 @@ fn migration_fills_title_keys_and_extracts_links_of_current_revisions() {
     let knowledge = Knowledge::open_with_default_sphere(&path, Some(SPHERE)).unwrap();
     assert_eq!(knowledge.page("OLD", ALL).unwrap().unwrap().title, "Old");
     assert_eq!(
-        knowledge.links("Old").unwrap().outgoing,
+        knowledge.links("Old", ALL).unwrap().outgoing,
         [link("rust", Some("Rust")), link("Stub", None)]
     );
 }
@@ -657,10 +663,10 @@ fn note_links_attach_it_to_pages_and_stubs() {
     );
 
     assert_eq!(
-        knowledge.notes_about("Reverse Proxy", 10).unwrap(),
+        knowledge.notes_about("Reverse Proxy", 10, ALL).unwrap(),
         std::slice::from_ref(&note)
     );
-    assert_eq!(knowledge.notes_about("caddy", 10).unwrap(), [note]);
+    assert_eq!(knowledge.notes_about("caddy", 10, ALL).unwrap(), [note]);
 }
 
 #[test]
@@ -688,12 +694,12 @@ fn notes_about_a_page_include_links_to_its_aliases_newest_first() {
         .add_note("[[rustlang]] and [[Rust]] again.", None, &writer())
         .unwrap();
 
-    let notes = knowledge.notes_about("Rust", 10).unwrap();
+    let notes = knowledge.notes_about("Rust", 10, ALL).unwrap();
     assert_eq!(
         notes.iter().map(|n| n.id).collect::<Vec<_>>(),
         [second.id, first.id]
     );
-    assert_eq!(knowledge.notes_about("Rust", 1).unwrap().len(), 1);
+    assert_eq!(knowledge.notes_about("Rust", 1, ALL).unwrap().len(), 1);
 }
 
 #[test]
@@ -703,7 +709,7 @@ fn notes_attached_to_a_stub_stay_attached_when_it_becomes_a_page() {
         .add_note("Look into [[Tantivy]].", None, &writer())
         .unwrap();
     create(&knowledge, "Tantivy", "A search library.");
-    let notes = knowledge.notes_about("Tantivy", 10).unwrap();
+    let notes = knowledge.notes_about("Tantivy", 10, ALL).unwrap();
     assert_eq!(notes[0].id, note.id);
     assert_eq!(notes[0].links, [link("Tantivy", Some("Tantivy"))]);
 }
@@ -729,14 +735,14 @@ fn notes_are_not_backlinks() {
     let knowledge = knowledge();
     create(&knowledge, "Rust", "");
     knowledge.add_note("[[Rust]]", None, &writer()).unwrap();
-    assert!(knowledge.links("Rust").unwrap().backlinks.is_empty());
+    assert!(knowledge.links("Rust", ALL).unwrap().backlinks.is_empty());
 }
 
 // Related pages
 
 fn related(knowledge: &Knowledge, title: &str, hops: u32) -> Vec<(String, u32, bool)> {
     let mut found: Vec<_> = knowledge
-        .related(title, hops, 100)
+        .related(title, hops, 100, ALL)
         .unwrap()
         .into_iter()
         .map(|r| (r.title, r.distance, r.stub))
@@ -813,7 +819,7 @@ fn related_resolves_aliases_and_includes_stubs() {
             r("mnemograph", 1, false)
         ]
     );
-    let rust = &knowledge.related("mnemograph", 1, 100).unwrap()[0];
+    let rust = &knowledge.related("mnemograph", 1, 100, ALL).unwrap()[0];
     assert_eq!(rust.page_type.as_deref(), Some("technology"));
 }
 
@@ -827,7 +833,7 @@ fn related_works_from_a_stub_but_not_from_an_unknown_title() {
         [r("A", 1, false), r("B", 2, false)]
     );
     assert!(matches!(
-        knowledge.related("Nothing", 2, 100),
+        knowledge.related("Nothing", 2, 100, ALL),
         Err(Error::PageNotFound(_))
     ));
 }
@@ -841,7 +847,7 @@ fn related_clamps_hops_and_respects_the_limit() {
     create(&knowledge, "D", "[[E]]");
     assert_eq!(related(&knowledge, "A", 0).len(), 1);
     assert_eq!(related(&knowledge, "A", 99).len(), 3);
-    assert_eq!(knowledge.related("A", 3, 2).unwrap().len(), 2);
+    assert_eq!(knowledge.related("A", 3, 2, ALL).unwrap().len(), 2);
 }
 
 /// Nodes as (title, distance, stub) and links as sorted title pairs.
@@ -849,7 +855,7 @@ type Graph = (Vec<(String, u32, bool)>, Vec<(String, String)>);
 
 /// The neighborhood as titles with stub flags, and its links as sorted title pairs.
 fn neighborhood(knowledge: &Knowledge, title: &str, hops: u32) -> Graph {
-    let graph = knowledge.neighborhood(title, hops, 100).unwrap();
+    let graph = knowledge.neighborhood(title, hops, 100, ALL).unwrap();
     let title_of = |i: usize| graph.nodes[i].title.clone();
     let mut edges: Vec<_> = graph
         .edges
@@ -932,7 +938,7 @@ fn the_neighborhood_resolves_aliases_and_starts_from_stubs() {
     // The self-link of Rust is no edge.
     assert_eq!(edges, [e("Rust", "mnemograph"), e("Tantivy", "mnemograph")]);
     assert!(matches!(
-        knowledge.neighborhood("Nothing", 2, 100),
+        knowledge.neighborhood("Nothing", 2, 100, ALL),
         Err(Error::PageNotFound(_))
     ));
 }
@@ -1055,7 +1061,7 @@ fn the_wiki_graph_filters_by_page_type_and_keeps_the_most_linked() {
 fn a_page_without_links_has_no_related_pages() {
     let knowledge = knowledge();
     create(&knowledge, "Alone", "");
-    assert!(knowledge.related("Alone", 3, 100).unwrap().is_empty());
+    assert!(knowledge.related("Alone", 3, 100, ALL).unwrap().is_empty());
 }
 
 // Search
@@ -1070,7 +1076,7 @@ fn found_titles(hits: &[SearchHit]) -> Vec<String> {
 }
 
 fn search(knowledge: &Knowledge, query: &str) -> Vec<String> {
-    found_titles(&knowledge.search(query, None, 10).unwrap())
+    found_titles(&knowledge.search(query, None, 10, ALL).unwrap())
 }
 
 #[test]
@@ -1117,7 +1123,7 @@ fn search_finds_titles_aliases_and_notes() {
 
     assert_eq!(search(&knowledge, "rauthy"), ["Rauthy"]);
     assert_eq!(search(&knowledge, "idp"), ["Rauthy"]);
-    let hits = knowledge.search("certificate", None, 10).unwrap();
+    let hits = knowledge.search("certificate", None, 10, ALL).unwrap();
     assert_eq!(found_titles(&hits), [format!("note {}", note.id)]);
     assert!(
         hits[0].snippet.contains("**certificates**"),
@@ -1167,10 +1173,10 @@ fn search_filters_by_page_type_and_rejects_unknown_types() {
     typed("Use Rust", "decision");
     knowledge.add_note("Rust note", None, &writer()).unwrap();
 
-    let hits = knowledge.search("rust", Some("Decision"), 10).unwrap();
+    let hits = knowledge.search("rust", Some("Decision"), 10, ALL).unwrap();
     assert_eq!(found_titles(&hits), ["Use Rust"]);
     assert!(matches!(
-        knowledge.search("rust", Some("crate"), 10),
+        knowledge.search("rust", Some("crate"), 10, ALL),
         Err(Error::UnknownPageType { .. })
     ));
 }
@@ -1234,7 +1240,7 @@ fn snippets_of_long_texts_are_cut_around_the_match() {
         "More filler. ".repeat(40)
     );
     create(&knowledge, "Long", &body);
-    let snippet = &knowledge.search("tantivy", None, 1).unwrap()[0].snippet;
+    let snippet = &knowledge.search("tantivy", None, 1, ALL).unwrap()[0].snippet;
     assert!(snippet.contains("**Tantivy**"), "{snippet}");
     assert!(
         snippet.starts_with('…') && snippet.ends_with('…'),
@@ -1351,15 +1357,21 @@ fn deleting_a_page_removes_it_and_its_title_becomes_a_stub() {
     assert_eq!(knowledge.page_revision("Traefik", 1).unwrap(), None);
     assert!(
         knowledge
-            .links("Proxies")
+            .links("Proxies", ALL)
             .unwrap()
             .outgoing
             .iter()
             .all(LinkTarget::is_stub)
     );
-    assert_eq!(knowledge.links("Traefik").unwrap().backlinks, ["Proxies"]);
-    assert_eq!(knowledge.notes_about("Traefik", 10).unwrap()[0].id, note.id);
-    assert!(knowledge.links("Docker").unwrap().backlinks.is_empty());
+    assert_eq!(
+        knowledge.links("Traefik", ALL).unwrap().backlinks,
+        ["Proxies"]
+    );
+    assert_eq!(
+        knowledge.notes_about("Traefik", 10, ALL).unwrap()[0].id,
+        note.id
+    );
+    assert!(knowledge.links("Docker", ALL).unwrap().backlinks.is_empty());
     assert!(search(&knowledge, "labels").is_empty());
 }
 
@@ -1385,7 +1397,7 @@ fn deleting_a_note_removes_only_that_note() {
 
     knowledge.delete_note(first.id).unwrap();
     let remaining: Vec<_> = knowledge
-        .notes_about("Rust", 10)
+        .notes_about("Rust", 10, ALL)
         .unwrap()
         .into_iter()
         .map(|n| n.id)
@@ -1459,7 +1471,7 @@ fn every_revision_and_note_records_its_author() {
     );
     assert_eq!(note.author, Some(claude.clone()));
     assert_eq!(
-        knowledge.notes_about("Rust", 1).unwrap()[0].author,
+        knowledge.notes_about("Rust", 1, ALL).unwrap()[0].author,
         Some(claude)
     );
 }
@@ -1850,27 +1862,47 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
         .unwrap();
     create(&knowledge, "Gone", "");
     let read = Access::ReadPage;
-    knowledge.record_access(&claude, read, "Rust", 1).unwrap();
     knowledge
-        .record_access(&claude, read, "rustlang", 1)
-        .unwrap();
-    knowledge.record_access(&vibe, read, "RUST", 1).unwrap();
-    knowledge.record_access(&vibe, read, "Gone", 1).unwrap();
-    knowledge.record_access(&vibe, read, "Missing", 0).unwrap();
-    knowledge
-        .record_access(&claude, Access::Search, "Datenbank", 3)
+        .record_access(&claude, &spheres(&["work"]), read, "Rust", 1)
         .unwrap();
     knowledge
-        .record_access(&claude, Access::Search, "Garage  backup", 0)
+        .record_access(&claude, &spheres(&["work"]), read, "rustlang", 1)
         .unwrap();
     knowledge
-        .record_access(&vibe, Access::Search, "garage backup", 0)
+        .record_access(&vibe, &spheres(&["work"]), read, "RUST", 1)
         .unwrap();
     knowledge
-        .record_access(&vibe, Access::Search, "Hetzner", 0)
+        .record_access(&vibe, &spheres(&["work"]), read, "Gone", 1)
         .unwrap();
     knowledge
-        .record_access(&claude, Access::Related, "Rust", 2)
+        .record_access(&vibe, &spheres(&["work"]), read, "Missing", 0)
+        .unwrap();
+    knowledge
+        .record_access(&claude, &spheres(&["work"]), Access::Search, "Datenbank", 3)
+        .unwrap();
+    knowledge
+        .record_access(
+            &claude,
+            &spheres(&["work"]),
+            Access::Search,
+            "Garage  backup",
+            0,
+        )
+        .unwrap();
+    knowledge
+        .record_access(
+            &vibe,
+            &spheres(&["work"]),
+            Access::Search,
+            "garage backup",
+            0,
+        )
+        .unwrap();
+    knowledge
+        .record_access(&vibe, &spheres(&["work"]), Access::Search, "Hetzner", 0)
+        .unwrap();
+    knowledge
+        .record_access(&claude, &spheres(&["work"]), Access::Related, "Rust", 2)
         .unwrap();
     knowledge.delete_page("Gone").unwrap();
 
@@ -1885,7 +1917,7 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
 
     // Reads under an alias or another spelling count for the page; deleted pages and failed
     // reads are left out.
-    let most_read = knowledge.most_read_pages(10).unwrap();
+    let most_read = knowledge.most_read_pages(10, ALL).unwrap();
     assert_eq!(
         most_read,
         [PageReads {
@@ -1895,7 +1927,7 @@ fn the_access_log_counts_reads_searches_and_gaps_per_agent() {
     );
 
     let gaps: Vec<_> = knowledge
-        .knowledge_gaps(10)
+        .knowledge_gaps(10, ALL)
         .unwrap()
         .into_iter()
         .map(|g| (g.terms, g.times, g.author.unwrap()))
@@ -1921,10 +1953,10 @@ fn old_access_log_entries_are_pruned() {
     let knowledge = knowledge();
     let agent = author();
     knowledge
-        .record_access(&agent, Access::Search, "old", 0)
+        .record_access(&agent, &spheres(&["work"]), Access::Search, "old", 0)
         .unwrap();
     knowledge
-        .record_access(&agent, Access::Search, "new", 0)
+        .record_access(&agent, &spheres(&["work"]), Access::Search, "new", 0)
         .unwrap();
     knowledge
         .conn()
@@ -1936,7 +1968,7 @@ fn old_access_log_entries_are_pruned() {
         .unwrap();
     assert_eq!(knowledge.prune_access_log(90).unwrap(), 1);
     assert_eq!(knowledge.prune_access_log(90).unwrap(), 0);
-    let gaps = knowledge.knowledge_gaps(10).unwrap();
+    let gaps = knowledge.knowledge_gaps(10, ALL).unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].terms, "new");
 }
@@ -2197,4 +2229,311 @@ fn an_empty_database_is_upgraded_without_a_default_sphere() {
     let dir = tempfile::tempdir().unwrap();
     let path = database_at_version(&dir, 9, "");
     assert!(Knowledge::open(&path).is_ok());
+}
+
+#[test]
+fn search_finds_only_visible_pages_and_notes() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "private", "Holidays", "A trip to the sea.");
+    create_in(&knowledge, "work", "Harbour", "The office by the sea.");
+    let booked = knowledge
+        .add_note("Booked the sea view.", None, &writer_in(&["private"]))
+        .unwrap();
+    let level = knowledge
+        .add_note(
+            "Sea level data for [[Holidays]].",
+            None,
+            &writer_in(&["work"]),
+        )
+        .unwrap();
+    let (work, private) = (spheres(&["work"]), spheres(&["private"]));
+    let found = |visibility| {
+        let mut titles = found_titles(&knowledge.search("sea", None, 10, visibility).unwrap());
+        titles.sort();
+        titles
+    };
+
+    assert_eq!(
+        found(Visibility::Within(&work)),
+        ["Harbour".to_owned(), format!("note {}", level.id)]
+    );
+    assert_eq!(
+        found(Visibility::Within(&private)),
+        ["Holidays".to_owned(), format!("note {}", booked.id)]
+    );
+    assert_eq!(found(ALL).len(), 4);
+
+    // A note's link to a page of another sphere is a stub.
+    let hits = knowledge
+        .search("level", None, 10, Visibility::Within(&work))
+        .unwrap();
+    let Found::Note(note) = &hits[0].found else {
+        panic!("expected a note: {hits:?}")
+    };
+    assert_eq!(note.links, [link("Holidays", None)]);
+}
+
+#[test]
+fn search_fetches_enough_hits_to_fill_the_limit_in_the_index_order() {
+    let knowledge = knowledge();
+    for i in 0..30 {
+        create_in(
+            &knowledge,
+            "private",
+            &format!("Rust {i}"),
+            "Rust, rust and rust.",
+        );
+    }
+    for (title, body) in [
+        ("Ferris", "The rust crab."),
+        (
+            "Cargo",
+            "Builds rust code and fetches crates from the registry.",
+        ),
+        (
+            "Clippy",
+            "Lints rust code, written in rust, for rust developers who like lints.",
+        ),
+    ] {
+        create_in(&knowledge, "work", title, body);
+    }
+    let work = spheres(&["work"]);
+    let everything = found_titles(&knowledge.search("rust", None, 100, ALL).unwrap());
+    let expected: Vec<String> = everything
+        .into_iter()
+        .filter(|title| ["Ferris", "Cargo", "Clippy"].contains(&title.as_str()))
+        .collect();
+
+    let hits = knowledge
+        .search("rust", None, 3, Visibility::Within(&work))
+        .unwrap();
+    assert_eq!(found_titles(&hits), expected);
+    let first_two = knowledge
+        .search("rust", None, 2, Visibility::Within(&work))
+        .unwrap();
+    assert_eq!(found_titles(&first_two), expected[..2]);
+}
+
+#[test]
+fn a_page_in_two_spheres_is_found_through_either() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "A language.");
+    add_sphere(&knowledge, "Rust", "private");
+    for sphere in ["work", "private"] {
+        let within = spheres(&[sphere]);
+        let hits = knowledge
+            .search("language", None, 10, Visibility::Within(&within))
+            .unwrap();
+        assert_eq!(found_titles(&hits), ["Rust"], "{sphere}");
+    }
+}
+
+#[test]
+fn links_to_and_from_pages_of_other_spheres_are_hidden() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "");
+    create_in(
+        &knowledge,
+        "work",
+        "Setup",
+        "[[Holidays]], [[Vacation]] and [[Rust]].",
+    );
+    knowledge
+        .write_page(
+            "Holidays",
+            "Back to [[Setup]], see [[Secret]].",
+            None,
+            PageChanges {
+                aliases: Some(vec!["Vacation".into()]),
+                ..Default::default()
+            },
+            &writer_in(&["private"]),
+        )
+        .unwrap();
+    let work = spheres(&["work"]);
+    let work = Visibility::Within(&work);
+
+    let setup = knowledge.links("Setup", work).unwrap();
+    assert_eq!(
+        setup.outgoing,
+        [
+            link("Holidays", None),
+            link("Vacation", None),
+            link("Rust", Some("Rust"))
+        ]
+    );
+    assert!(setup.backlinks.is_empty(), "{setup:?}");
+    assert_eq!(
+        knowledge.links("Setup", ALL).unwrap().backlinks,
+        ["Holidays"]
+    );
+
+    // The hidden page is a stub: its own links are not shown, only the visible ones to it.
+    let holidays = knowledge.links("holidays", work).unwrap();
+    assert_eq!(
+        holidays,
+        Links {
+            outgoing: Vec::new(),
+            backlinks: vec!["Setup".into()],
+        }
+    );
+    assert!(
+        knowledge
+            .links("Secret", work)
+            .unwrap()
+            .backlinks
+            .is_empty()
+    );
+    assert_eq!(
+        knowledge.links("Secret", ALL).unwrap().backlinks,
+        ["Holidays"]
+    );
+}
+
+#[test]
+fn notes_about_a_page_are_only_those_of_visible_spheres() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "");
+    create_in(&knowledge, "private", "Holidays", "");
+    let at_home = knowledge
+        .add_note("[[Rust]] at home.", None, &writer_in(&["private"]))
+        .unwrap();
+    let at_work = knowledge
+        .add_note(
+            "[[Rust]] at work, before the [[Holidays]].",
+            None,
+            &writer_in(&["work"]),
+        )
+        .unwrap();
+    let (work, private) = (spheres(&["work"]), spheres(&["private"]));
+
+    let notes = knowledge
+        .notes_about("Rust", 10, Visibility::Within(&work))
+        .unwrap();
+    assert_eq!(notes.iter().map(|n| n.id).collect::<Vec<_>>(), [at_work.id]);
+    assert_eq!(
+        notes[0].links,
+        [link("Rust", Some("Rust")), link("Holidays", None)]
+    );
+    let notes = knowledge
+        .notes_about("Rust", 10, Visibility::Within(&private))
+        .unwrap();
+    assert_eq!(notes.iter().map(|n| n.id).collect::<Vec<_>>(), [at_home.id]);
+    assert_eq!(knowledge.notes_about("Rust", 10, ALL).unwrap().len(), 2);
+}
+
+#[test]
+fn related_walks_only_through_visible_pages() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Setup", "[[Rust]] and [[Holidays]].");
+    create_in(&knowledge, "work", "Rust", "");
+    create_in(
+        &knowledge,
+        "private",
+        "Holidays",
+        "[[Beach]] and [[Setup]].",
+    );
+    create_in(&knowledge, "private", "Beach", "");
+    let work = spheres(&["work"]);
+    let work = Visibility::Within(&work);
+    let related = |title: &str, visibility| -> Vec<(String, u32, bool)> {
+        knowledge
+            .related(title, 3, 100, visibility)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.title, r.distance, r.stub))
+            .collect()
+    };
+
+    assert_eq!(
+        related("Setup", work),
+        [r("Holidays", 1, true), r("Rust", 1, false)]
+    );
+    assert_eq!(
+        related("Setup", ALL),
+        [
+            r("Holidays", 1, false),
+            r("Rust", 1, false),
+            r("Beach", 2, false)
+        ]
+    );
+    // From the hidden page, as a stub, only visible links lead anywhere.
+    assert_eq!(
+        related("Holidays", work),
+        [r("Setup", 1, false), r("Rust", 2, false)]
+    );
+    assert!(matches!(
+        knowledge.related("Beach", 3, 100, work),
+        Err(Error::PageNotFound(_))
+    ));
+
+    let graph = knowledge.neighborhood("Setup", 3, 100, work).unwrap();
+    let titles: Vec<&str> = graph.nodes.iter().map(|n| n.title.as_str()).collect();
+    assert_eq!(titles, ["Setup", "Holidays", "Rust"]);
+}
+
+#[test]
+fn the_access_log_records_spheres_and_counts_reads_and_gaps_per_sphere() {
+    let knowledge = knowledge();
+    create_in(&knowledge, "work", "Rust", "");
+    create_in(&knowledge, "private", "Holidays", "");
+    let agent = author();
+    let (work, private, both) = (
+        spheres(&["work"]),
+        spheres(&["private"]),
+        spheres(&["private", "work"]),
+    );
+    let record = |spheres: &Spheres, access, target: &str, hits| {
+        knowledge
+            .record_access(&agent, spheres, access, target, hits)
+            .unwrap()
+    };
+    record(&work, Access::ReadPage, "Rust", 1);
+    record(&both, Access::ReadPage, "Rust", 1);
+    record(&private, Access::ReadPage, "Holidays", 1);
+    record(&both, Access::ReadPage, "Holidays", 1);
+    record(&work, Access::Search, "kubernetes", 0);
+    record(&private, Access::Search, "flights", 0);
+    record(&both, Access::Search, "kubernetes", 0);
+
+    let reads = |visibility| -> Vec<(String, u32)> {
+        knowledge
+            .most_read_pages(10, visibility)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.title, p.reads))
+            .collect()
+    };
+    assert_eq!(reads(Visibility::Within(&work)), [("Rust".into(), 2)]);
+    assert_eq!(
+        reads(Visibility::Within(&private)),
+        [("Holidays".into(), 2)]
+    );
+    assert_eq!(reads(ALL).len(), 2);
+
+    let gaps = |visibility| -> Vec<(String, u32)> {
+        knowledge
+            .knowledge_gaps(10, visibility)
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.terms, g.times))
+            .collect()
+    };
+    assert_eq!(gaps(Visibility::Within(&work)), [("kubernetes".into(), 2)]);
+    assert_eq!(
+        gaps(Visibility::Within(&private)),
+        [("kubernetes".into(), 1), ("flights".into(), 1)]
+    );
+
+    // Pruning removes the spheres with their entries.
+    knowledge
+        .conn()
+        .execute("UPDATE access SET at = '2000-01-01T00:00:00.000Z'", [])
+        .unwrap();
+    knowledge.prune_access_log(1).unwrap();
+    let left: i64 = knowledge
+        .conn()
+        .query_row("SELECT count(*) FROM access_sphere", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
 }
