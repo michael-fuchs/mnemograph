@@ -553,14 +553,32 @@ async fn old_access_log_entries_are_pruned_at_startup() {
     let knowledge = Arc::new(Knowledge::open(dir.path().join("prune.db")).unwrap());
     let agent = mnemograph_core::Author::Agent("claude-code".into());
     knowledge
-        .record_access(&agent, mnemograph_core::Access::Search, "recent", 0)
+        .record_access(
+            &agent,
+            &mnemograph_core::Spheres::new(["work"]).unwrap(),
+            mnemograph_core::Access::Search,
+            "recent",
+            0,
+        )
         .unwrap();
     // A search older than a 7-day retention: written directly into the database file.
     backdate_access_log(&dir.path().join("prune.db"));
     knowledge
-        .record_access(&agent, mnemograph_core::Access::Search, "kept", 0)
+        .record_access(
+            &agent,
+            &mnemograph_core::Spheres::new(["work"]).unwrap(),
+            mnemograph_core::Access::Search,
+            "kept",
+            0,
+        )
         .unwrap();
-    assert_eq!(knowledge.knowledge_gaps(10).unwrap().len(), 2);
+    assert_eq!(
+        knowledge
+            .knowledge_gaps(10, mnemograph_core::Visibility::All)
+            .unwrap()
+            .len(),
+        2
+    );
 
     let shutdown = CancellationToken::new();
     let _app = mnemograph::app(
@@ -577,14 +595,25 @@ async fn old_access_log_entries_are_pruned_at_startup() {
         },
     );
     let pruned = tokio::time::timeout(Duration::from_secs(5), async {
-        while knowledge.knowledge_gaps(10).unwrap().len() != 1 {
+        while knowledge
+            .knowledge_gaps(10, mnemograph_core::Visibility::All)
+            .unwrap()
+            .len()
+            != 1
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
     shutdown.cancel();
     assert!(pruned.is_ok(), "the old entry was not pruned");
-    assert_eq!(knowledge.knowledge_gaps(10).unwrap()[0].terms, "kept");
+    assert_eq!(
+        knowledge
+            .knowledge_gaps(10, mnemograph_core::Visibility::All)
+            .unwrap()[0]
+            .terms,
+        "kept"
+    );
 }
 
 /// Moves every access log entry so far 30 days into the past.

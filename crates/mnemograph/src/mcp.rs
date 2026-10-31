@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use mnemograph_core::{
-    Access, Author, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges,
-    Related, SearchHit, Visibility, Writer,
+    Access, Found, Knowledge, LinkTarget, Links, MAX_HOPS, Note, Page, PageChanges, Related,
+    SearchHit, Visibility, Writer,
 };
 use rmcp::{
     ServerHandler,
@@ -324,7 +324,7 @@ impl McpServer {
             .base_revision
             .map(|base| u32::try_from(base).map_err(|_| format!("invalid base_revision {base}")))
             .transpose()?;
-        let writer = writer(&request)?;
+        let writer = caller(&request)?;
         self.limiter.check_page(&args.body)?;
         self.limiter.count_write(&writer.author)?;
         let knowledge = self.knowledge.clone();
@@ -339,8 +339,8 @@ impl McpServer {
             };
             let page =
                 knowledge.write_page(&args.title, &args.body, base_revision, changes, &writer)?;
-            let links = knowledge.links(&page.title)?;
-            let notes = knowledge.notes_about(&page.title, RECENT_NOTES)?;
+            let links = knowledge.links(&page.title, writer.visibility())?;
+            let notes = knowledge.notes_about(&page.title, RECENT_NOTES, writer.visibility())?;
             Ok(PageView::new(page, links, notes))
         })
         .await
@@ -349,7 +349,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Read a page by its title or an alias (case-insensitive): its body, revision, type, aliases, the titles it links to, the pages linking to it and its most recent notes. For a stub (a title that is linked but has no page yet) the error says what links to it."
+        description = "Read a page by its title or an alias (case-insensitive): its body, revision, type, spheres, aliases, the titles it links to, the pages linking to it and its most recent notes. For a stub (a title that is linked but has no page yet) the error says what links to it. Only pages and notes of this connection's spheres are visible; other pages show as stubs."
     )]
     async fn read_page(
         &self,
@@ -358,27 +358,24 @@ impl McpServer {
     ) -> Result<rmcp::Json<PageView>, String> {
         let knowledge = self.knowledge.clone();
         let title = args.title;
-        let reader = reader(&request);
-        let spheres = writer(&request)?.spheres;
+        let caller = caller(&request)?;
         let (page, links, notes) = blocking({
             let title = title.clone();
             move || {
-                let page = knowledge.page(&title, Visibility::Within(&spheres))?;
+                let visibility = caller.visibility();
+                let page = knowledge.page(&title, visibility)?;
                 log_access(
                     &knowledge,
-                    reader,
+                    &caller,
                     Access::ReadPage,
                     &title,
                     page.is_some().into(),
                 );
-                // A page of other spheres is treated as missing, not as a stub.
-                if page.is_none() && knowledge.page(&title, Visibility::All)?.is_some() {
-                    return Ok((None, Links::default(), Vec::new()));
-                }
+                // A page of other spheres is a stub here, with only the visible links to it.
                 Ok((
                     page,
-                    knowledge.links(&title)?,
-                    knowledge.notes_about(&title, RECENT_NOTES)?,
+                    knowledge.links(&title, visibility)?,
+                    knowledge.notes_about(&title, RECENT_NOTES, visibility)?,
                 ))
             }
         })
@@ -393,7 +390,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search pages (titles, aliases, bodies) and notes by full text, best matches first, each with a snippet. Understands German and English word forms. Use it before starting a task and before creating a page."
+        description = "Search pages (titles, aliases, bodies) and notes of this connection's spheres by full text, best matches first, each with a snippet. Understands German and English word forms. Use it before starting a task and before creating a page."
     )]
     async fn search(
         &self,
@@ -401,15 +398,20 @@ impl McpServer {
         Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<SearchView>, String> {
         let knowledge = self.knowledge.clone();
-        let reader = reader(&request);
+        let caller = caller(&request)?;
         let limit = args
             .limit
             .unwrap_or(SEARCH_LIMIT.0)
             .clamp(1, SEARCH_LIMIT.1) as usize;
         let page_type = args.page_type.filter(|t| !t.trim().is_empty());
         blocking(move || {
-            let hits = knowledge.search(&args.query, page_type.as_deref(), limit)?;
-            log_access(&knowledge, reader, Access::Search, &args.query, hits.len());
+            let hits = knowledge.search(
+                &args.query,
+                page_type.as_deref(),
+                limit,
+                caller.visibility(),
+            )?;
+            log_access(&knowledge, &caller, Access::Search, &args.query, hits.len());
             Ok(hits)
         })
         .await
@@ -421,7 +423,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Find what else is known around a subject: the pages and stubs within a few links of a page, following links in both directions, nearest first."
+        description = "Find what else is known around a subject: the pages and stubs within a few links of a page, following links in both directions, nearest first. Only links of pages in this connection's spheres are followed."
     )]
     async fn related(
         &self,
@@ -429,12 +431,12 @@ impl McpServer {
         Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<RelatedView>, String> {
         let knowledge = self.knowledge.clone();
-        let reader = reader(&request);
+        let caller = caller(&request)?;
         let hops = args.hops.unwrap_or(2).clamp(1, MAX_HOPS.into()) as u32;
         blocking(move || {
-            let related = knowledge.related(&args.title, hops, RELATED_LIMIT);
+            let related = knowledge.related(&args.title, hops, RELATED_LIMIT, caller.visibility());
             let hits = related.as_ref().map(Vec::len).unwrap_or(0);
-            log_access(&knowledge, reader, Access::Related, &args.title, hits);
+            log_access(&knowledge, &caller, Access::Related, &args.title, hits);
             related
         })
         .await
@@ -454,7 +456,7 @@ impl McpServer {
         Extension(request): Extension<http::request::Parts>,
     ) -> Result<rmcp::Json<NoteView>, String> {
         let knowledge = self.knowledge.clone();
-        let writer = writer(&request)?;
+        let writer = caller(&request)?;
         self.limiter.check_note(&args.body)?;
         self.limiter.count_write(&writer.author)?;
         let sphere = args.sphere.filter(|s| !s.trim().is_empty());
@@ -503,26 +505,13 @@ impl ServerHandler for McpServer {
     }
 }
 
-/// Who reads, for the access log: the authenticated identity, if any.
-fn reader(request: &http::request::Parts) -> Option<Author> {
-    request
-        .extensions
-        .get::<Identity>()
-        .map(|identity| identity.author.clone())
-}
-
-/// Records a read, search or exploration in the access log. A failure is only logged: it must
-/// never fail the agent's call.
-fn log_access(
-    knowledge: &Knowledge,
-    reader: Option<Author>,
-    access: Access,
-    target: &str,
-    hits: usize,
-) {
-    let Some(reader) = reader else { return };
+/// Records a read, search or exploration in the access log, with the spheres of the caller's
+/// registration. A failure is only logged: it must never fail the agent's call.
+fn log_access(knowledge: &Knowledge, caller: &Writer, access: Access, target: &str, hits: usize) {
     let hits = u32::try_from(hits).unwrap_or(u32::MAX);
-    if let Err(error) = knowledge.record_access(&reader, access, target, hits) {
+    if let Err(error) =
+        knowledge.record_access(&caller.author, &caller.spheres, access, target, hits)
+    {
         tracing::warn!(%error, "could not record an access");
     }
 }
@@ -530,7 +519,7 @@ fn log_access(
 /// Who acts: the identity the authentication middleware attached to the request, with the
 /// spheres of its registration. Without one the call is refused, so a misconfigured router can
 /// never record a wrong author or cross a sphere boundary.
-fn writer(request: &http::request::Parts) -> Result<Writer, String> {
+fn caller(request: &http::request::Parts) -> Result<Writer, String> {
     match request.extensions.get::<Identity>() {
         Some(identity) => Ok(Writer {
             author: identity.author.clone(),

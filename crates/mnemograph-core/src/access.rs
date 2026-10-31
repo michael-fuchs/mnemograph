@@ -2,7 +2,9 @@
 //! statistics.
 
 use crate::stats::weekly_per_author;
-use crate::{Author, Knowledge, RESOLVED_KEYS, Result, WeeklyActivity, title_key};
+use rusqlite::params;
+
+use crate::{Author, Knowledge, Result, Spheres, Visibility, WeeklyActivity, title_key};
 
 /// What an agent did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,19 +61,30 @@ pub struct KnowledgeGap {
 const ACCESSES: &str = "event (author, created_at) AS (SELECT author, at FROM access)";
 
 impl Knowledge {
-    /// Records that `author` read, searched or explored `target` (a title, or search terms)
-    /// with `hits` results.
+    /// Records that `author`, through a registration with `spheres`, read, searched or
+    /// explored `target` (a title, or search terms) with `hits` results.
     pub fn record_access(
         &self,
         author: &Author,
+        spheres: &Spheres,
         access: Access,
         target: &str,
         hits: u32,
     ) -> Result<()> {
-        self.conn().execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO access (author, tool, target, target_key, hits) VALUES (?1, ?2, ?3, ?4, ?5)",
             (author.to_string(), access.as_str(), target.trim(), title_key(target), hits),
         )?;
+        let access_id = tx.last_insert_rowid();
+        for sphere in spheres.names() {
+            tx.execute(
+                "INSERT INTO access_sphere (access_id, sphere) VALUES (?1, ?2)",
+                params![access_id, sphere],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -112,14 +125,22 @@ impl Knowledge {
     }
 
     /// The pages agents read most, under their current titles (reads under an alias or an
-    /// earlier title count for the page); pages deleted since are left out.
-    pub fn most_read_pages(&self, limit: usize) -> Result<Vec<PageReads>> {
+    /// earlier title count for the page); pages deleted since are left out. With
+    /// [`Visibility::Within`], only visible pages and reads through registrations sharing a
+    /// sphere count.
+    pub fn most_read_pages(
+        &self,
+        limit: usize,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<PageReads>> {
         let conn = self.conn();
         let mut query = conn.prepare(&format!(
             "SELECT p.title, count(*) FROM access a \
-             JOIN ({RESOLVED_KEYS}) k ON k.key = a.target_key JOIN page p ON p.id = k.page_id \
-             WHERE a.tool = 'read_page' AND a.hits > 0 \
-             GROUP BY p.id ORDER BY count(*) DESC, max(a.at) DESC LIMIT ?1"
+             JOIN ({}) k ON k.key = a.target_key JOIN page p ON p.id = k.page_id \
+             WHERE a.tool = 'read_page' AND a.hits > 0 AND {} \
+             GROUP BY p.id ORDER BY count(*) DESC, max(a.at) DESC LIMIT ?1",
+            visibility.resolved_keys(),
+            visibility.accesses("a.id")
         ))?;
         let pages = query
             .query_map([limit as i64], |row| {
@@ -133,16 +154,22 @@ impl Knowledge {
     }
 
     /// Searches that found nothing, the most recent first; the same terms (ignoring case and
-    /// spacing) count as one.
-    pub fn knowledge_gaps(&self, limit: usize) -> Result<Vec<KnowledgeGap>> {
+    /// spacing) count as one. With [`Visibility::Within`], only searches through registrations
+    /// sharing a sphere count.
+    pub fn knowledge_gaps(
+        &self,
+        limit: usize,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<KnowledgeGap>> {
         let conn = self.conn();
         // The latest search of each terms supplies how they were written, by whom and when.
-        let mut query = conn.prepare(
+        let mut query = conn.prepare(&format!(
             "SELECT a.target, g.times, a.author, a.at FROM \
                (SELECT target_key, count(*) AS times, max(id) AS latest FROM access \
-                WHERE tool = 'search' AND hits = 0 GROUP BY target_key) g \
+                WHERE tool = 'search' AND hits = 0 AND {} GROUP BY target_key) g \
              JOIN access a ON a.id = g.latest ORDER BY a.at DESC, a.id DESC LIMIT ?1",
-        )?;
+            visibility.accesses("id")
+        ))?;
         let gaps = query
             .query_map([limit as i64], |row| {
                 let author: String = row.get(2)?;

@@ -306,23 +306,48 @@ impl Knowledge {
         Ok(())
     }
 
-    /// Searches pages and notes by full text, best matches first. With `page_type`, only pages
-    /// of that type are searched.
+    /// Searches visible pages and notes by full text, best matches first. With `page_type`,
+    /// only pages of that type are searched.
+    ///
+    /// The index knows nothing about spheres, so it is asked for more hits than `limit` until
+    /// enough of them are visible or there are no more; the ranking stays the index's.
     pub fn search(
         &self,
         query: &str,
         page_type: Option<&str>,
         limit: usize,
+        visibility: Visibility<'_>,
     ) -> Result<Vec<SearchHit>> {
         let page_type = self.check_page_type(page_type.map(str::to_owned))?;
-        let hits = self.search.search(query, page_type.as_deref(), limit)?;
+        let mut fetch = limit.max(1);
+        loop {
+            let hits = self.search.search(query, page_type.as_deref(), fetch)?;
+            let exhausted = hits.len() < fetch;
+            let mut found = self.visible_hits(hits, visibility)?;
+            if found.len() >= limit || exhausted {
+                found.truncate(limit);
+                return Ok(found);
+            }
+            fetch = fetch.saturating_mul(SEARCH_FETCH_GROWTH);
+        }
+    }
+
+    /// The hits whose page or note exists and is visible, in the same order.
+    fn visible_hits(
+        &self,
+        hits: Vec<search::RawHit>,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<SearchHit>> {
         let conn = self.conn();
         let mut found = Vec::with_capacity(hits.len());
         for hit in hits {
             let item = match hit.item {
                 Item::Page(id) => conn
                     .query_row(
-                        "SELECT title, page_type FROM page WHERE id = ?1",
+                        &format!(
+                            "SELECT title, page_type FROM page WHERE id = ?1 AND {}",
+                            visibility.pages("id")
+                        ),
                         [id],
                         |row| {
                             Ok(Found::Page {
@@ -332,9 +357,9 @@ impl Knowledge {
                         },
                     )
                     .optional()?,
-                Item::Note(id) => notes::find_note(&conn, id)?.map(Found::Note),
+                Item::Note(id) => notes::find_note(&conn, id, visibility)?.map(Found::Note),
             };
-            // A hit without a row means the index is ahead of a deletion; skip it.
+            // A hit without a row is invisible, or the index is ahead of a deletion; skip it.
             if let Some(item) = item {
                 found.push(SearchHit {
                     found: item,
@@ -554,24 +579,27 @@ impl Knowledge {
         Ok(Some(revisions))
     }
 
-    /// Returns the links around a title or alias, whether it names a page or a stub.
-    pub fn links(&self, title: &str) -> Result<Links> {
+    /// Returns the links around a title or alias, whether it names a page or a stub. Only
+    /// visible pages count: a page that is not visible is a stub here, its links are not shown,
+    /// and links to it lead to a stub.
+    pub fn links(&self, title: &str, visibility: Visibility<'_>) -> Result<Links> {
         let conn = self.conn();
-        let (page_id, keys) = names(&conn, title)?;
+        let (page_id, keys) = names(&conn, title, visibility)?;
         let Some(page_id) = page_id else {
             return Ok(Links {
                 outgoing: Vec::new(),
-                backlinks: backlinks(&conn, None, &keys)?,
+                backlinks: backlinks(&conn, None, &keys, visibility)?,
             });
         };
 
         let outgoing = conn
             .prepare(&format!(
                 "SELECT l.target_title, t.title FROM link l \
-                 LEFT JOIN ({RESOLVED_KEYS}) k ON k.key = l.target_key \
+                 LEFT JOIN ({}) k ON k.key = l.target_key \
                  LEFT JOIN page t ON t.id = k.page_id \
                  WHERE l.source_page_id = ?1 AND k.page_id IS NOT ?1 \
-                 ORDER BY l.position"
+                 ORDER BY l.position",
+                visibility.resolved_keys()
             ))?
             .query_map([page_id], |row| {
                 Ok(LinkTarget {
@@ -582,7 +610,7 @@ impl Knowledge {
             .collect::<rusqlite::Result<_>>()?;
         Ok(Links {
             outgoing,
-            backlinks: backlinks(&conn, Some(page_id), &keys)?,
+            backlinks: backlinks(&conn, Some(page_id), &keys, visibility)?,
         })
     }
 
@@ -613,7 +641,11 @@ impl Knowledge {
 /// A page ID no page has (SQLite row IDs start at 1).
 const NO_PAGE: i64 = 0;
 
-/// Every key that leads to a page: its title key and its aliases' keys.
+/// How much more a search asks the index for when too few of its hits are visible.
+const SEARCH_FETCH_GROWTH: usize = 4;
+
+/// Every key that leads to a page: its title key and its aliases' keys. For what a caller may
+/// see, use [`Visibility::resolved_keys`].
 const RESOLVED_KEYS: &str =
     "SELECT title_key AS key, id AS page_id FROM page UNION ALL SELECT key, page_id FROM alias";
 
@@ -628,16 +660,29 @@ fn resolve(conn: &Connection, key: &str) -> Result<Option<i64>> {
         .optional()?)
 }
 
-/// Resolves a title or alias: returns the page it names (if any) and every key leading there —
-/// the page's title and alias keys, or just the title's own key for a stub.
-fn names(conn: &Connection, title: &str) -> Result<(Option<i64>, Vec<String>)> {
+/// Resolves a title or alias: returns the visible page it names (if any) and every key leading
+/// there — the page's title and alias keys, or just the title's own key for a stub. A page that
+/// is not visible is a stub.
+fn names(
+    conn: &Connection,
+    title: &str,
+    visibility: Visibility<'_>,
+) -> Result<(Option<i64>, Vec<String>)> {
     let key = title_key(title);
-    let Some(page_id) = resolve(conn, &key)? else {
+    let resolved_keys = visibility.resolved_keys();
+    let page_id = conn
+        .query_row(
+            &format!("SELECT page_id FROM ({resolved_keys}) WHERE key = ?1"),
+            [&key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(page_id) = page_id else {
         return Ok((None, vec![key]));
     };
     let keys = conn
         .prepare(&format!(
-            "SELECT key FROM ({RESOLVED_KEYS}) WHERE page_id = ?1"
+            "SELECT key FROM ({resolved_keys}) WHERE page_id = ?1"
         ))?
         .query_map([page_id], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -652,13 +697,19 @@ fn page_spheres(conn: &Connection, page_id: i64) -> Result<Vec<String>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Titles of the pages linking to any of `keys`, except `page_id` itself.
-fn backlinks(conn: &Connection, page_id: Option<i64>, keys: &[String]) -> Result<Vec<String>> {
+/// Titles of the visible pages linking to any of `keys`, except `page_id` itself.
+fn backlinks(
+    conn: &Connection,
+    page_id: Option<i64>,
+    keys: &[String],
+    visibility: Visibility<'_>,
+) -> Result<Vec<String>> {
     let mut backlinks = Vec::new();
-    let mut query = conn.prepare(
+    let mut query = conn.prepare(&format!(
         "SELECT p.title FROM link l JOIN page p ON p.id = l.source_page_id \
-         WHERE l.target_key = ?1 AND p.id IS NOT ?2",
-    )?;
+         WHERE l.target_key = ?1 AND p.id IS NOT ?2 AND {}",
+        visibility.pages("p.id")
+    ))?;
     for key in keys {
         for title in query.query_map(params![key, page_id], |row| row.get::<_, String>(0))? {
             backlinks.push(title?);

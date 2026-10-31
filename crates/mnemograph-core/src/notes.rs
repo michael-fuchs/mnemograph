@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use crate::search::{IndexedText, Item};
 use crate::title::title_key;
 use crate::{
-    Author, Error, Knowledge, LinkTarget, RESOLVED_KEYS, Result, Writer, increase_change_counter,
+    Author, Error, Knowledge, LinkTarget, Result, Visibility, Writer, increase_change_counter,
     links, names, split_spheres,
 };
 
@@ -52,7 +52,7 @@ impl Knowledge {
         }
         drop(insert);
         increase_change_counter(&tx)?;
-        let note = note(&tx, note_id)?;
+        let note = note(&tx, note_id, writer.visibility())?;
         tx.commit()?;
         self.index_after_commit(
             &conn,
@@ -69,42 +69,66 @@ impl Knowledge {
         Ok(note)
     }
 
-    /// Returns all notes, oldest first.
+    /// Returns all notes, oldest first (for the owner).
     pub fn notes(&self) -> Result<Vec<Note>> {
         let conn = self.conn();
         let ids: Vec<i64> = conn
             .prepare("SELECT id FROM note ORDER BY id")?
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| note(&conn, id)).collect()
+        ids.into_iter()
+            .map(|id| note(&conn, id, Visibility::All))
+            .collect()
     }
 
-    /// Returns the most recent notes linking to this title or alias (of a page or a stub),
-    /// newest first.
-    pub fn notes_about(&self, title: &str, limit: u32) -> Result<Vec<Note>> {
+    /// Returns the most recent visible notes linking to this title or alias (of a page or a
+    /// stub), newest first. A page that is not visible counts as a stub: only the notes linking
+    /// to the title itself are returned, not those linking to its aliases.
+    pub fn notes_about(
+        &self,
+        title: &str,
+        limit: u32,
+        visibility: Visibility<'_>,
+    ) -> Result<Vec<Note>> {
         let conn = self.conn();
-        let (_, keys) = names(&conn, title)?;
+        let (_, keys) = names(&conn, title, visibility)?;
         let placeholders = vec!["?"; keys.len()].join(", ");
         let ids: Vec<i64> = conn
             .prepare(&format!(
-                "SELECT DISTINCT note_id FROM note_link WHERE target_key IN ({placeholders}) \
-                 ORDER BY note_id DESC LIMIT {limit}"
+                "SELECT DISTINCT note_id FROM note_link \
+                 WHERE target_key IN ({placeholders}) AND {} \
+                 ORDER BY note_id DESC LIMIT {limit}",
+                visibility.notes("note_id")
             ))?
             .query_map(params_from_iter(&keys), |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| note(&conn, id)).collect()
+        ids.into_iter()
+            .map(|id| note(&conn, id, visibility))
+            .collect()
     }
 }
 
-/// Returns the note with this ID, if it exists.
-pub(crate) fn find_note(conn: &Connection, note_id: i64) -> Result<Option<Note>> {
+/// Returns the note with this ID, if it exists and is visible.
+pub(crate) fn find_note(
+    conn: &Connection,
+    note_id: i64,
+    visibility: Visibility<'_>,
+) -> Result<Option<Note>> {
     let exists = conn
-        .query_row("SELECT 1 FROM note WHERE id = ?1", [note_id], |_| Ok(()))
+        .query_row(
+            &format!(
+                "SELECT 1 FROM note WHERE id = ?1 AND {}",
+                visibility.notes("id")
+            ),
+            [note_id],
+            |_| Ok(()),
+        )
         .optional()?;
-    exists.map(|()| note(conn, note_id)).transpose()
+    exists.map(|()| note(conn, note_id, visibility)).transpose()
 }
 
-fn note(conn: &Connection, note_id: i64) -> Result<Note> {
+/// The note with this ID; its links lead to pages only if they are visible, otherwise to stubs.
+fn note(conn: &Connection, note_id: i64, visibility: Visibility<'_>) -> Result<Note> {
     let (body, created_at, author, spheres) = conn.query_row(
         "SELECT body, created_at, author, \
          (SELECT group_concat(sphere, char(10)) FROM note_sphere WHERE note_id = note.id) \
@@ -122,9 +146,10 @@ fn note(conn: &Connection, note_id: i64) -> Result<Note> {
     let links = conn
         .prepare(&format!(
             "SELECT l.target_title, t.title FROM note_link l \
-             LEFT JOIN ({RESOLVED_KEYS}) k ON k.key = l.target_key \
+             LEFT JOIN ({}) k ON k.key = l.target_key \
              LEFT JOIN page t ON t.id = k.page_id \
-             WHERE l.note_id = ?1 ORDER BY l.position"
+             WHERE l.note_id = ?1 ORDER BY l.position",
+            visibility.resolved_keys()
         ))?
         .query_map([note_id], |row| {
             Ok(LinkTarget {

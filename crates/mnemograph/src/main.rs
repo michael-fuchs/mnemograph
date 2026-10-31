@@ -200,7 +200,7 @@ fn delete(
             let page = knowledge
                 .page(&title, Visibility::All)?
                 .with_context(|| format!("no page titled {title:?}"))?;
-            let backlinks = knowledge.links(&title)?.backlinks.len();
+            let backlinks = knowledge.links(&title, Visibility::All)?.backlinks.len();
             let mut question = format!(
                 "The page {:?} will be deleted with {} revision(s)",
                 page.title, page.revision

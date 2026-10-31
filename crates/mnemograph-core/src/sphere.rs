@@ -19,7 +19,8 @@ pub fn is_sphere_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// A non-empty set of valid sphere names, sorted.
+/// A non-empty set of valid sphere names, sorted. Only [`Spheres::new`] creates one, so the
+/// names are always valid, which lets [`Visibility`] write them into SQL as literals.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spheres(Vec<String>);
 
@@ -44,6 +45,17 @@ impl Spheres {
 
     pub fn contains(&self, name: &str) -> bool {
         self.0.iter().any(|n| n == name)
+    }
+
+    /// The names as an SQL list of string literals, e.g. `'private', 'work'`. Safe because
+    /// valid names contain no quotes.
+    fn sql_list(&self) -> String {
+        self.0
+            .iter()
+            .inspect(|name| assert!(is_sphere_name(name), "unchecked sphere name"))
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The sphere something new gets: the one named, which must be among these, or the only
@@ -81,6 +93,44 @@ impl Visibility<'_> {
             Visibility::All => true,
             Visibility::Within(allowed) => spheres.iter().any(|s| allowed.contains(s)),
         }
+    }
+
+    /// An SQL condition that holds if the page ID in `column` is visible.
+    pub(crate) fn pages(&self, column: &str) -> String {
+        self.condition(column, "SELECT page_id FROM page_sphere")
+    }
+
+    /// An SQL condition that holds if the note ID in `column` is visible.
+    pub(crate) fn notes(&self, column: &str) -> String {
+        self.condition(column, "SELECT note_id FROM note_sphere")
+    }
+
+    /// An SQL condition that holds if the access log entry ID in `column` was made through a
+    /// registration sharing a sphere with these; entries from before spheres have none.
+    pub(crate) fn accesses(&self, column: &str) -> String {
+        self.condition(column, "SELECT access_id FROM access_sphere")
+    }
+
+    /// `column IN (ids of rows of a sphere table in these spheres)`, or true for everything.
+    fn condition(&self, column: &str, ids: &str) -> String {
+        match self {
+            Visibility::All => "1".to_owned(),
+            Visibility::Within(spheres) => format!(
+                "{column} IN ({ids} WHERE sphere IN ({}))",
+                spheres.sql_list()
+            ),
+        }
+    }
+
+    /// Every key that leads to a visible page: its title key and its aliases' keys. Names of
+    /// other pages lead nowhere, so links to them are stubs.
+    pub(crate) fn resolved_keys(&self) -> String {
+        format!(
+            "SELECT title_key AS key, id AS page_id FROM page WHERE {} \
+             UNION ALL SELECT key, page_id FROM alias WHERE {}",
+            self.pages("id"),
+            self.pages("page_id")
+        )
     }
 }
 
