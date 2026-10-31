@@ -45,6 +45,7 @@ impl Knowledge {
                 "id": note.id,
                 "created_at": note.created_at,
                 "author": note.author.as_ref().map(ToString::to_string),
+                "spheres": note.spheres,
                 "body": note.body,
                 "links": links,
             });
@@ -70,6 +71,7 @@ fn page_file(page: &Page) -> String {
     if !page.aliases.is_empty() {
         text += &format!("aliases: {}\n", json!(page.aliases));
     }
+    text += &format!("spheres: {}\n", json!(page.spheres));
     text += &format!("revision: {}\n", page.revision);
     text += &format!("created_at: {}\n", json!(page.created_at));
     text += &format!("updated_at: {}\n", json!(page.updated_at));

@@ -18,7 +18,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router, middleware};
 use mnemograph_core::{
-    Author, Found, Knowledge, MAX_HOPS, Neighborhood, Note, Session, WikiGraph, title_key,
+    Author, Found, Knowledge, MAX_HOPS, Neighborhood, Note, Session, Visibility, WikiGraph,
+    title_key,
 };
 use serde::Deserialize;
 use tokio::sync::watch;
@@ -489,7 +490,7 @@ async fn page(
             Err(error) => return Err(error),
         };
         Ok::<_, mnemograph_core::Error>((
-            knowledge.page(&requested)?,
+            knowledge.page(&requested, Visibility::All)?,
             knowledge.links(&requested)?,
             knowledge.notes_about(&requested, RECENT_NOTES)?,
             graph,
@@ -924,7 +925,7 @@ async fn revision(
     let requested = title.clone();
     let loaded = tokio::task::spawn_blocking(move || {
         Ok::<_, mnemograph_core::Error>((
-            knowledge.page(&requested)?,
+            knowledge.page(&requested, Visibility::All)?,
             knowledge.page_revision(&requested, number)?,
         ))
     })

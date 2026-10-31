@@ -32,6 +32,7 @@ impl Ui {
             Arc::new(knowledge),
             AppConfig {
                 auth: None,
+                spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
@@ -566,6 +567,7 @@ async fn old_access_log_entries_are_pruned_at_startup() {
         knowledge.clone(),
         AppConfig {
             auth: None,
+            spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
             allowed_hosts: vec!["127.0.0.1".into()],
             limits: Default::default(),
             web_login: None,

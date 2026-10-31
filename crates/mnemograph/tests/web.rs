@@ -136,6 +136,7 @@ impl Ui {
                 issuer: provider.issuer.clone(),
                 resource: format!("{base}/mcp"),
                 required_scopes: vec!["mnemograph".into()],
+                spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
             })
             .await
             .unwrap(),
@@ -148,7 +149,10 @@ impl Ui {
                 "A language. See [[Ferris]].\n\n<script>alert(1)</script>",
                 None,
                 PageChanges::default(),
-                &Author::Agent("claude-code".into()),
+                &mnemograph_core::Writer {
+                    author: Author::Agent("claude-code".into()),
+                    spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
+                },
             )
             .unwrap();
         let shutdown = CancellationToken::new();
@@ -156,6 +160,7 @@ impl Ui {
             Arc::new(knowledge),
             AppConfig {
                 auth: Some(authenticator.clone()),
+                spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: Some(LoginSettings {

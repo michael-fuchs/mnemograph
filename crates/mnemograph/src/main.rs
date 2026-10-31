@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use mnemograph::web::login::LoginSettings;
-use mnemograph::{AppConfig, AuthSettings, Authenticator, WriteLimits};
-use mnemograph_core::Knowledge;
+use mnemograph::{AppConfig, AuthSettings, Authenticator, SphereConfig, WriteLimits};
+use mnemograph_core::{Knowledge, Visibility};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -16,6 +16,10 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// The sphere that pages and notes from before spheres get when the database is upgraded.
+    /// Needed only for that upgrade.
+    #[arg(long, env = "MNEMOGRAPH_DEFAULT_SPHERE", global = true)]
+    default_sphere: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -62,6 +66,9 @@ struct ServeArgs {
     /// Address to listen on.
     #[arg(long, env = "MNEMOGRAPH_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
+    /// The spheres file: mnemograph's part of the central configuration (see dev/spheres.toml).
+    #[arg(long, env = "MNEMOGRAPH_SPHERES")]
+    spheres: PathBuf,
     /// Allowed page types, comma-separated.
     #[arg(
         long,
@@ -146,22 +153,32 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    match Cli::parse().command {
-        Command::Serve(args) => serve(*args).await,
-        Command::Export { dir, db } => export(db, dir),
-        Command::Delete { what, db, yes } => delete(db, what, yes),
-        Command::Reindex { db } => reindex(db),
+    let Cli {
+        command,
+        default_sphere,
+    } = Cli::parse();
+    let default_sphere = default_sphere.as_deref();
+    match command {
+        Command::Serve(args) => serve(*args, default_sphere).await,
+        Command::Export { dir, db } => export(db, dir, default_sphere),
+        Command::Delete { what, db, yes } => delete(db, what, yes, default_sphere),
+        Command::Reindex { db } => reindex(db, default_sphere),
     }
 }
 
-/// Opens an existing database; unlike `serve`, the CLI commands never create one.
-fn open_existing(db: &Path) -> anyhow::Result<Knowledge> {
+/// Opens a database, upgrading it if needed; unlike `serve`, the CLI commands never create one.
+fn open_existing(db: &Path, default_sphere: Option<&str>) -> anyhow::Result<Knowledge> {
     anyhow::ensure!(db.exists(), "database {} does not exist", db.display());
-    Knowledge::open(db).with_context(|| format!("opening database {}", db.display()))
+    open(db, default_sphere)
 }
 
-fn export(db: PathBuf, dir: PathBuf) -> anyhow::Result<()> {
-    let summary = open_existing(&db)?.export(&dir)?;
+fn open(db: &Path, default_sphere: Option<&str>) -> anyhow::Result<Knowledge> {
+    Knowledge::open_with_default_sphere(db, default_sphere)
+        .with_context(|| format!("opening database {}", db.display()))
+}
+
+fn export(db: PathBuf, dir: PathBuf, default_sphere: Option<&str>) -> anyhow::Result<()> {
+    let summary = open_existing(&db, default_sphere)?.export(&dir)?;
     println!(
         "exported to {}: pages: {}, notes: {}",
         dir.display(),
@@ -171,12 +188,17 @@ fn export(db: PathBuf, dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn delete(db: PathBuf, what: DeleteTarget, yes: bool) -> anyhow::Result<()> {
-    let knowledge = open_existing(&db)?;
+fn delete(
+    db: PathBuf,
+    what: DeleteTarget,
+    yes: bool,
+    default_sphere: Option<&str>,
+) -> anyhow::Result<()> {
+    let knowledge = open_existing(&db, default_sphere)?;
     match what {
         DeleteTarget::Page { title } => {
             let page = knowledge
-                .page(&title)?
+                .page(&title, Visibility::All)?
                 .with_context(|| format!("no page titled {title:?}"))?;
             let backlinks = knowledge.links(&title)?.backlinks.len();
             let mut question = format!(
@@ -218,17 +240,18 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-fn reindex(db: PathBuf) -> anyhow::Result<()> {
-    let knowledge = open_existing(&db)?;
+fn reindex(db: PathBuf, default_sphere: Option<&str>) -> anyhow::Result<()> {
+    let knowledge = open_existing(&db, default_sphere)?;
     knowledge.rebuild_search_index()?;
     tracing::info!(db = %db.display(), "search index rebuilt");
     Ok(())
 }
 
-async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<()> {
     let ServeArgs {
         db,
         listen,
+        spheres,
         page_types,
         oidc_issuer,
         public_url,
@@ -242,6 +265,15 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         web_client_secret,
         owner_group,
     } = args;
+    let spheres = SphereConfig::load(&spheres)?.names();
+    if let Some(default_sphere) = default_sphere {
+        anyhow::ensure!(
+            spheres.contains(default_sphere),
+            "the default sphere {default_sphere:?} is not configured; configured spheres: {}",
+            spheres.names().join(", ")
+        );
+    }
+    tracing::info!(spheres = ?spheres.names(), "spheres configured");
     let public_url = reqwest::Url::parse(&public_url)
         .with_context(|| format!("invalid public URL {public_url:?}"))?;
     let public_base = public_url.as_str().trim_end_matches('/').to_owned();
@@ -256,6 +288,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     .map(|s| s.trim().to_owned())
                     .filter(|s| !s.is_empty())
                     .collect(),
+                spheres: spheres.clone(),
             };
             let authenticator = Authenticator::discover(settings)
                 .await
@@ -296,14 +329,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         allowed_hosts.push(host.to_owned());
     }
 
-    let knowledge = Knowledge::open(&db)
-        .with_context(|| format!("opening database {}", db.display()))?
-        .with_page_types(page_types);
+    let knowledge = open(&db, default_sphere)?.with_page_types(page_types);
     let shutdown = CancellationToken::new();
     let app = mnemograph::app(
         Arc::new(knowledge),
         AppConfig {
             auth,
+            spheres,
             allowed_hosts,
             web_login,
             graph_max_nodes,

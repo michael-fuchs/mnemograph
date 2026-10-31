@@ -1,5 +1,5 @@
-//! End-to-end tests of OAuth: agents need a valid access token, and their identity becomes the
-//! author of what they write.
+//! End-to-end tests of OAuth: agents need a valid access token, their identity becomes the
+//! author of what they write, and the spheres in their token bound what they see.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +15,8 @@ use mnemograph::{AppConfig, AuthSettings, Authenticator};
 use mnemograph_core::{Author, Knowledge};
 use rmcp::{
     ServiceExt,
-    model::CallToolRequestParams,
+    model::{CallToolRequestParams, CallToolResult},
+    service::{RoleClient, RunningService},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -81,6 +82,7 @@ impl TestServer {
             issuer: ISSUER.into(),
             resource: format!("{base}/mcp"),
             required_scopes: vec!["mnemograph".into()],
+            spheres: mnemograph_core::Spheres::new(["work", "private"]).unwrap(),
         };
         let authenticator = Authenticator::with_keys(
             settings,
@@ -97,6 +99,7 @@ impl TestServer {
             knowledge.clone(),
             AppConfig {
                 auth: Some(Arc::new(authenticator)),
+                spheres: mnemograph_core::Spheres::new(["work", "private"]).unwrap(),
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
@@ -128,9 +131,20 @@ impl TestServer {
             "aud": format!("{}/mcp", self.base),
             "sub": "owner-user-id",
             "azp": "claude-code-laptop",
-            "scope": "openid mnemograph",
+            "scope": "openid mnemograph sphere:work",
             "exp": now() + 300,
         })
+    }
+
+    /// Connects an MCP client whose token has these scopes.
+    async fn client_with_scope(&self, keys: &Keys, scope: &str) -> RunningService<RoleClient, ()> {
+        let mut claims = self.valid_claims();
+        claims["scope"] = json!(scope);
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", self.base))
+                .auth_header(keys.token("at+jwt", claims)),
+        );
+        ().serve(transport).await.unwrap()
     }
 
     /// Sends a raw MCP request and returns status, WWW-Authenticate header and body.
@@ -221,7 +235,12 @@ async fn valid_token_is_accepted_and_its_client_becomes_the_author() {
 
     let agent = Some(Author::Agent("claude-code-laptop".into()));
     assert_eq!(
-        server.knowledge.page("Rust").unwrap().unwrap().author,
+        server
+            .knowledge
+            .page("Rust", mnemograph_core::Visibility::All)
+            .unwrap()
+            .unwrap()
+            .author,
         agent
     );
     assert_eq!(server.knowledge.notes().unwrap()[0].author, agent);
@@ -299,4 +318,201 @@ async fn token_without_the_required_scope_is_forbidden() {
     let (status, challenge, _) = server.raw_call(Some(&keys.token("at+jwt", claims))).await;
     assert_eq!(status, 403);
     assert!(challenge.unwrap().contains("error=\"insufficient_scope\""));
+}
+
+async fn call(
+    client: &RunningService<RoleClient, ()>,
+    tool: &'static str,
+    args: Value,
+) -> CallToolResult {
+    client
+        .call_tool(
+            CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap()
+}
+
+fn structured(result: &CallToolResult) -> &Value {
+    assert_ne!(result.is_error, Some(true), "tool failed: {result:?}");
+    result.structured_content.as_ref().unwrap()
+}
+
+fn error_text(result: &CallToolResult) -> String {
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "expected a tool error: {result:?}"
+    );
+    serde_json::to_string(&result.content).unwrap()
+}
+
+#[tokio::test]
+async fn token_without_a_known_sphere_is_forbidden_with_a_clear_error() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    for scope in ["openid mnemograph", "openid mnemograph sphere:clubs"] {
+        let mut claims = server.valid_claims();
+        claims["scope"] = json!(scope);
+        let (status, challenge, body) = server.raw_call(Some(&keys.token("at+jwt", claims))).await;
+        assert_eq!(status, 403, "{scope}");
+        let challenge = challenge.unwrap();
+        assert!(
+            challenge.contains("error=\"insufficient_scope\""),
+            "{challenge}"
+        );
+        assert!(challenge.contains("sphere:<name>"), "{challenge}");
+        assert!(
+            body.contains("no sphere") && body.contains("private, work"),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_agent_cannot_read_or_change_a_page_of_another_sphere() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let private = server
+        .client_with_scope(&keys, "mnemograph sphere:private")
+        .await;
+    let work = server
+        .client_with_scope(&keys, "mnemograph sphere:work")
+        .await;
+
+    let written = call(
+        &private,
+        "write_page",
+        json!({ "title": "Holidays", "body": "Secret plans." }),
+    )
+    .await;
+    assert_eq!(structured(&written)["spheres"], json!(["private"]));
+    let read = call(&private, "read_page", json!({ "title": "holidays" })).await;
+    assert_eq!(structured(&read)["body"], "Secret plans.");
+
+    let read = error_text(&call(&work, "read_page", json!({ "title": "Holidays" })).await);
+    assert!(
+        read.contains("no page titled") && !read.contains("stub"),
+        "{read}"
+    );
+    let change = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Holidays", "body": "mine", "base_revision": 1 }),
+        )
+        .await,
+    );
+    assert!(change.contains("no page titled"), "{change}");
+    let create = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Holidays", "body": "mine" }),
+        )
+        .await,
+    );
+    assert!(
+        create.contains("not available") && !create.contains("Secret"),
+        "{create}"
+    );
+
+    let page = server
+        .knowledge
+        .page("Holidays", mnemograph_core::Visibility::All)
+        .unwrap()
+        .unwrap();
+    assert_eq!((page.revision, page.body.as_str()), (1, "Secret plans."));
+    // Authors and the access log are unaffected by spheres.
+    assert_eq!(
+        page.author,
+        Some(Author::Agent("claude-code-laptop".into()))
+    );
+    let access = server.knowledge.agent_access().unwrap();
+    assert_eq!(access[0].reads, 2);
+}
+
+#[tokio::test]
+async fn a_page_in_two_spheres_is_visible_to_both() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let work = server
+        .client_with_scope(&keys, "mnemograph sphere:work")
+        .await;
+    let private = server
+        .client_with_scope(&keys, "mnemograph sphere:private")
+        .await;
+    structured(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Rust", "body": "A language." }),
+        )
+        .await,
+    );
+    // Agents cannot change a page's spheres yet, so the owner's database does it.
+    rusqlite::Connection::open(server._dir.path().join("test.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO page_sphere (page_id, sphere) SELECT id, 'private' FROM page",
+            [],
+        )
+        .unwrap();
+
+    for (client, base) in [(&work, 1), (&private, 2)] {
+        let read = call(client, "read_page", json!({ "title": "Rust" })).await;
+        assert_eq!(structured(&read)["spheres"], json!(["private", "work"]));
+        let changed = call(
+            client,
+            "write_page",
+            json!({ "title": "Rust", "body": format!("revision {}", base + 1), "base_revision": base }),
+        )
+        .await;
+        assert_eq!(structured(&changed)["revision"], base + 1);
+    }
+}
+
+#[tokio::test]
+async fn a_registration_with_two_spheres_must_name_one_when_creating() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let both = server
+        .client_with_scope(&keys, "mnemograph sphere:work sphere:private")
+        .await;
+
+    let unnamed =
+        error_text(&call(&both, "write_page", json!({ "title": "Rust", "body": "" })).await);
+    assert!(
+        unnamed.contains("name the sphere") && unnamed.contains("private, work"),
+        "{unnamed}"
+    );
+    let foreign = error_text(
+        &call(
+            &both,
+            "write_page",
+            json!({ "title": "Rust", "body": "", "sphere": "clubs" }),
+        )
+        .await,
+    );
+    assert!(
+        foreign.contains("\\\"clubs\\\" is not available"),
+        "{foreign}"
+    );
+    let named = call(
+        &both,
+        "write_page",
+        json!({ "title": "Rust", "body": "", "sphere": "private" }),
+    )
+    .await;
+    assert_eq!(structured(&named)["spheres"], json!(["private"]));
+
+    let unnamed = error_text(&call(&both, "add_note", json!({ "body": "About [[Rust]]." })).await);
+    assert!(unnamed.contains("name the sphere"), "{unnamed}");
+    let note = call(
+        &both,
+        "add_note",
+        json!({ "body": "About [[Rust]].", "sphere": "work" }),
+    )
+    .await;
+    assert_eq!(structured(&note)["spheres"], json!(["work"]));
 }

@@ -12,7 +12,7 @@ The second round of features, revised on 2026-10-31. The first version of this p
 [ADR 0008](../adr/0008-pages-and-notes-carry-spheres.md).
 
 - **Pages and notes:** every page and note carries one or more spheres.
-- **Registrations:** each agent registration (a pre-registered OAuth client) is bound to a set of spheres, and its access tokens carry them, for example as scopes. mnemograph checks them like the audience and the required scope.
+- **Registrations:** each agent registration (a pre-registered OAuth client) is bound to a set of spheres, and its access tokens carry them as scopes `sphere:<name>` (#44). mnemograph checks them like the audience and the required scope, and refuses a token without a configured sphere.
   - An agent installation that works in several sphere sets has one registration per set, and a repository's MCP configuration picks one.
 - **Visibility:** through a registration, an agent sees a page or note only if it shares a sphere with the registration. This holds for every tool, the graph, the statistics and the access log.
   - The owner's web login sees everything and can filter by sphere.

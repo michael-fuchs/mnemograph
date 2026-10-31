@@ -57,3 +57,7 @@ _Avoid_: Admin, user
 **Agent**:
 One registered AI client installation for a set of spheres (for example Claude Code on a particular machine, for work) that reads and writes knowledge through MCP. It sees only pages and notes of its spheres, can create and change them, but never delete them.
 _Avoid_: Bot, client, assistant
+
+**Connection**:
+One pre-registered client at the identity provider through which an agent reaches mnemograph, bound to a set of spheres that its access tokens carry as `sphere:<name>` scopes. ADR 0008 calls it the agent's registration.
+_Avoid_: Integration, session, account
