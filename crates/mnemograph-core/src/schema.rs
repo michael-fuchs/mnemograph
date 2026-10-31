@@ -27,6 +27,7 @@ pub(crate) fn migrations(default_sphere: Option<&str>) -> Migrations<'static> {
             move |tx: &Transaction<'_>| assign_default_sphere(tx, default_sphere.as_deref()),
         ),
         M::up(include_str!("../migrations/0011-access-spheres.sql")),
+        M::up(include_str!("../migrations/0012-revision-spheres.sql")),
     ])
 }
 

@@ -265,15 +265,23 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
         web_client_secret,
         owner_group,
     } = args;
-    let spheres = SphereConfig::load(&spheres)?.names();
+    let config = SphereConfig::load(&spheres)?;
+    let forbidden = config.forbidden();
+    let Some(spheres) = config.allowed() else {
+        bail!(
+            "every configured sphere's rule keeps its content out of the wiki (wiki = \"never\"): {}",
+            forbidden.join(", ")
+        );
+    };
     if let Some(default_sphere) = default_sphere {
         anyhow::ensure!(
             spheres.contains(default_sphere),
-            "the default sphere {default_sphere:?} is not configured; configured spheres: {}",
+            "the default sphere {default_sphere:?} is not configured or must not enter the wiki; \
+             usable spheres: {}",
             spheres.names().join(", ")
         );
     }
-    tracing::info!(spheres = ?spheres.names(), "spheres configured");
+    tracing::info!(spheres = ?spheres.names(), ?forbidden, "spheres configured");
     let public_url = reqwest::Url::parse(&public_url)
         .with_context(|| format!("invalid public URL {public_url:?}"))?;
     let public_base = public_url.as_str().trim_end_matches('/').to_owned();
@@ -289,6 +297,7 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
                     .filter(|s| !s.is_empty())
                     .collect(),
                 spheres: spheres.clone(),
+                forbidden_spheres: forbidden.clone(),
             };
             let authenticator = Authenticator::discover(settings)
                 .await
@@ -329,7 +338,9 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
         allowed_hosts.push(host.to_owned());
     }
 
-    let knowledge = open(&db, default_sphere)?.with_page_types(page_types);
+    let knowledge = open(&db, default_sphere)?
+        .with_page_types(page_types)
+        .with_forbidden_spheres(forbidden);
     let shutdown = CancellationToken::new();
     let app = mnemograph::app(
         Arc::new(knowledge),

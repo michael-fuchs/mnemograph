@@ -49,8 +49,11 @@ pub struct AuthSettings {
     pub resource: String,
     /// Scopes a token must have to use mnemograph.
     pub required_scopes: Vec<String>,
-    /// The configured spheres; a token must carry the scope of at least one of them.
+    /// The usable spheres; a token must carry the scope of at least one of them.
     pub spheres: Spheres,
+    /// Configured spheres whose rule keeps their content out of the wiki: tokens naming them
+    /// cannot use them.
+    pub forbidden_spheres: Vec<String>,
 }
 
 impl AuthSettings {
@@ -106,6 +109,11 @@ pub enum AuthError {
         .0.join(", ")
     )]
     NoSphere(Vec<String>),
+    #[error(
+        "the token's spheres {} must not enter the wiki (their sphere rule says wiki = \"never\"); use a connection with another sphere",
+        .0.join(", ")
+    )]
+    ForbiddenSpheres(Vec<String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +136,7 @@ mod tests {
             resource: resource.into(),
             required_scopes: vec![],
             spheres: Spheres::new(["work"]).unwrap(),
+            forbidden_spheres: vec![],
         }
     }
 
@@ -276,7 +285,8 @@ impl Authenticator {
     }
 
     /// Validates a bearer token and returns who sent it, with the spheres its `sphere:<name>`
-    /// scopes name. Scopes of spheres that are not configured are ignored.
+    /// scopes name. Scopes of spheres that are not configured are ignored, and so are those
+    /// of spheres that must not enter the wiki; a token left with none is refused.
     pub async fn authenticate(&self, token: &str) -> Result<Identity, AuthError> {
         let invalid = |reason: &str| AuthError::InvalidToken(reason.to_owned());
         let header = jsonwebtoken::decode_header(token).map_err(|e| invalid(&e.to_string()))?;
@@ -328,15 +338,26 @@ impl Authenticator {
             .or(claims.azp)
             .ok_or_else(|| invalid("no client ID (client_id or azp)"))?;
         let known = &self.settings.spheres;
-        let (spheres, unknown): (Vec<&str>, Vec<&str>) = granted
+        let forbidden = &self.settings.forbidden_spheres;
+        let (spheres, ignored): (Vec<&str>, Vec<&str>) = granted
             .iter()
             .filter_map(|scope| scope.strip_prefix(SPHERE_SCOPE_PREFIX))
             .partition(|sphere| known.contains(sphere));
-        if !unknown.is_empty() {
-            tracing::debug!(%client, ?unknown, "ignored scopes of unknown spheres");
+        if !ignored.is_empty() {
+            tracing::debug!(%client, ?ignored, "ignored scopes of unknown or forbidden spheres");
         }
-        let spheres =
-            Spheres::new(spheres).map_err(|_| AuthError::NoSphere(known.names().to_vec()))?;
+        let spheres = Spheres::new(spheres).map_err(|_| {
+            let named: Vec<String> = ignored
+                .iter()
+                .filter(|s| forbidden.iter().any(|f| f == *s))
+                .map(|s| s.to_string())
+                .collect();
+            if named.is_empty() {
+                AuthError::NoSphere(known.names().to_vec())
+            } else {
+                AuthError::ForbiddenSpheres(named)
+            }
+        })?;
         tracing::debug!(%client, sub = ?claims.sub, spheres = ?spheres.names(), "authenticated agent");
         Ok(Identity {
             author: Author::Agent(client),
@@ -484,7 +505,7 @@ fn challenge(settings: &AuthSettings, err: &AuthError) -> Response {
             value += ", error=\"insufficient_scope\"";
             StatusCode::FORBIDDEN
         }
-        AuthError::NoSphere(_) => {
+        AuthError::NoSphere(_) | AuthError::ForbiddenSpheres(_) => {
             value += &format!(
                 ", error=\"insufficient_scope\", error_description=\"{}\"",
                 err.to_string().replace(['"', '\\'], "'")

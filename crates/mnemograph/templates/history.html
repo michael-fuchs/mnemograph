@@ -3,7 +3,7 @@
 {% block content %}
 <h1>History of <a href="{{ url }}">{{ title }}</a></h1>
 <table class="history">
-  <thead><tr><th>Revision</th><th>Created</th><th>By</th><th>Title</th><th>Type</th><th>Size</th></tr></thead>
+  <thead><tr><th>Revision</th><th>Created</th><th>By</th><th>Title</th><th>Type</th><th>Spheres</th><th>Size</th></tr></thead>
   <tbody>
     {% for row in rows %}
     <tr>
@@ -12,6 +12,7 @@
       <td>{{ row.author }}</td>
       <td>{{ row.title }}</td>
       <td>{% if let Some(t) = row.page_type %}<span class="type">{{ t }}</span>{% endif %}</td>
+      <td>{% if row.spheres_changed %}<strong title="changed in this revision">{{ row.spheres }}</strong>{% else %}{{ row.spheres }}{% endif %}</td>
       <td class="nowrap">{{ row.bytes }} bytes</td>
     </tr>
     {% endfor %}
