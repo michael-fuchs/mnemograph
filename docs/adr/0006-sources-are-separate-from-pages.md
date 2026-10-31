@@ -1,5 +1,7 @@
 # Sources are separate from pages
 
+**Status:** superseded (2026-10-31): documents and web references live in a separate document service; pages and notes cite its items by URL (see `GLOSSARY.md`, Citation).
+
 Uploaded files and web resources become **sources**, a concept beside pages rather than a page type. A page is curated knowledge that changes through revisions; a source is external content that must stay as it was received, so it consists of unchanging **snapshots** (refreshing a URL adds a new snapshot when the content changed) plus metadata (fixed core fields and a free key-value map), extracted text and an abstract. Pages and notes cite sources with `[[source:Title]]`, a namespace of its own, so a page and a source about the same subject (a page "Rauthy" and the source "Rauthy documentation") never collide. This complements ADR 0001: pages remain the only unit of curated knowledge and the only target of links.
 
 ## Considered Options
