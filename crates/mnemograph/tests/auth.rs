@@ -440,7 +440,10 @@ async fn an_agent_cannot_read_or_change_a_page_of_another_sphere() {
         page.author,
         Some(Author::Agent("claude-code-laptop".into()))
     );
-    let access = server.knowledge.agent_access().unwrap();
+    let access = server
+        .knowledge
+        .agent_access(mnemograph_core::Visibility::All)
+        .unwrap();
     assert_eq!(access[0].reads, 2);
 }
 

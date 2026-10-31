@@ -2,6 +2,7 @@
 {% block title %}History of {{ title }} – mnemograph{% endblock %}
 {% block content %}
 <h1>History of <a href="{{ url }}">{{ title }}</a></h1>
+<div class="table-scroll">
 <table class="history">
   <thead><tr><th>Revision</th><th>Created</th><th>By</th><th>Title</th><th>Type</th><th>Spheres</th><th>Size</th></tr></thead>
   <tbody>
@@ -18,4 +19,5 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

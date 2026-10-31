@@ -2,6 +2,9 @@
 {% block title %}Statistics – mnemograph{% endblock %}
 {% block content %}
 <h1>Statistics</h1>
+{% if header.filtered %}
+<p class="notice">Only the spheres {{ header.sphere_summary }}: their pages and notes, links from them, and what agents did through connections with these spheres. Pages of other spheres count as stubs.</p>
+{% endif %}
 <dl class="totals">
   <div><dt>pages</dt><dd>{{ totals.pages }}</dd></div>
   <div><dt>stubs</dt><dd>{{ totals.stubs }}</dd></div>

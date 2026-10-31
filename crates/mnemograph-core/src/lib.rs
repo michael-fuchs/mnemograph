@@ -215,6 +215,8 @@ pub enum Found {
     Page {
         title: String,
         page_type: Option<String>,
+        /// Sorted.
+        spheres: Vec<String>,
     },
     Note(Note),
 }
@@ -359,7 +361,10 @@ impl Knowledge {
                 Item::Page(id) => conn
                     .query_row(
                         &format!(
-                            "SELECT title, page_type FROM page WHERE id = ?1 AND {}",
+                            "SELECT title, page_type, \
+                             (SELECT group_concat(sphere, char(10)) FROM page_sphere \
+                              WHERE page_id = page.id) \
+                             FROM page WHERE id = ?1 AND {}",
                             visibility.pages("id")
                         ),
                         [id],
@@ -367,6 +372,7 @@ impl Knowledge {
                             Ok(Found::Page {
                                 title: row.get(0)?,
                                 page_type: row.get(1)?,
+                                spheres: split_spheres(row.get(2)?),
                             })
                         },
                     )
@@ -458,6 +464,17 @@ impl Knowledge {
         checked.sort();
         checked.dedup();
         Ok(checked)
+    }
+
+    /// The spheres that pages or notes belong to, sorted.
+    pub fn spheres_in_use(&self) -> Result<Vec<String>> {
+        Ok(self
+            .conn()
+            .prepare(
+                "SELECT sphere FROM page_sphere UNION SELECT sphere FROM note_sphere ORDER BY 1",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// The allowed page types.

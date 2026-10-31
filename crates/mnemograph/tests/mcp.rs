@@ -550,6 +550,7 @@ async fn search_finds_pages_and_notes_with_snippets() {
             "kind": "page",
             "title": "Speicher",
             "page_type": "decision",
+            "spheres": ["work"],
             "snippet": "Wir vergleichen **Datenbanken**."
         }])
     );

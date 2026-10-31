@@ -41,6 +41,26 @@ h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
   border: 1px solid var(--line); color: var(--muted);
 }
 .stub-badge { color: var(--stub); border-color: var(--stub); vertical-align: middle; }
+.sphere {
+  display: inline-block; padding: 0 0.45rem; border-radius: 4px; font-size: 0.8rem;
+  margin-right: 0.25rem; white-space: nowrap;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--fg);
+}
+.sphere-filter { position: relative; margin-right: 1rem; font-size: 0.9rem; color: var(--muted); }
+.sphere-filter summary { cursor: pointer; white-space: nowrap; list-style-position: inside; }
+.sphere-filter.active summary { color: var(--accent); font-weight: 600; }
+.sphere-filter form {
+  position: absolute; right: 0; top: 1.8rem; z-index: 20; min-width: 12rem;
+  display: flex; flex-direction: column; gap: 0.3rem; padding: 0.6rem 0.8rem;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--fg) 15%, transparent);
+}
+.sphere-filter label { cursor: pointer; white-space: nowrap; }
+.sphere-filter .actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.3rem; }
+.sphere-filter button {
+  font: inherit; padding: 0.15rem 0.8rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg);
+}
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); }
 th { font-size: 0.85rem; color: var(--muted); font-weight: 500; }
@@ -109,4 +129,6 @@ ul.gaps { padding-left: 1.2rem; }
 @media (max-width: 34rem) {
   header.site { flex-wrap: wrap; row-gap: 0.5rem; }
   header.site form.search { order: 3; flex-basis: 100%; max-width: none; margin: 0; }
+  .sphere-filter { order: 2; margin-right: 0; }
+  .sphere-filter form { right: auto; left: 0; }
 }

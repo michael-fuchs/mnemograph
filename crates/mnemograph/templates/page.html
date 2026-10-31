@@ -6,6 +6,7 @@
   <h1>{{ title }}</h1>
   <p class="meta">
     {% if let Some(t) = page_type %}<span class="type">{{ t }}</span>{% endif %}
+    {% call m::spheres(spheres) %}{% endcall %}
     <a href="{{ url }}/history">revision {{ revision }}</a> · updated {{ updated_at }} by {{ updated_by }} · created {{ created_at }}
     {% if !aliases.is_empty() %}<br>also known as: {{ aliases.join(", ") }}{% endif %}
   </p>

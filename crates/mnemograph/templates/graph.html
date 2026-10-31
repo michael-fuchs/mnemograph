@@ -12,7 +12,7 @@
   {% if filtered %}<a href="/graph">Show all</a>{% endif %}
 </form>
 {% if graph.nodes == 0 %}
-<p class="empty">{% if filtered %}No pages of these types yet.{% else %}Nothing written yet.{% endif %}</p>
+<p class="empty">{% if filtered %}No pages of these types yet.{% else if header.filtered %}Nothing in the spheres {{ header.sphere_summary }} yet.{% else %}Nothing written yet.{% endif %}</p>
 {% else %}
 {% if hidden > 0 %}
 <p class="notice">Showing the {{ graph.nodes }} most-linked pages and stubs; {{ hidden }} more are hidden. Choose page types to see others.</p>

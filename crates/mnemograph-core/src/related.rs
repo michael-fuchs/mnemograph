@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use rusqlite::{Connection, params};
 
-use crate::{Error, Knowledge, RESOLVED_KEYS, Result, Visibility, names};
+use crate::{Error, Knowledge, Result, Visibility, names, page_spheres, split_spheres};
 
 /// The most hops [`Knowledge::related`] walks.
 pub const MAX_HOPS: u32 = 3;
@@ -18,6 +18,8 @@ pub struct Related {
     pub stub: bool,
     /// Number of links between the two, following links in either direction.
     pub distance: u32,
+    /// The page's spheres, sorted; empty for a stub.
+    pub spheres: Vec<String>,
 }
 
 /// A page or stub with the pages and stubs around it, and the links between all of them.
@@ -40,6 +42,8 @@ pub struct GraphNode {
     pub stub: bool,
     /// Number of other nodes in the graph it is linked with, in either direction.
     pub degree: u32,
+    /// The page's spheres, sorted; empty for a stub.
+    pub spheres: Vec<String>,
 }
 
 /// The whole wiki as a graph, or the part of it that fits.
@@ -55,42 +59,56 @@ pub struct WikiGraph {
 }
 
 impl Knowledge {
-    /// Returns every page, including unlinked ones, and every stub, with the links between them.
-    /// If `page_types` is not empty, only pages of those types are included, and no stubs (they
-    /// have no type). Of more than `max_nodes` matches, only the most-linked are returned.
-    pub fn wiki_graph(&self, page_types: &[String], max_nodes: usize) -> Result<WikiGraph> {
+    /// Returns every visible page, including unlinked ones, and every stub, with the links
+    /// between them; as everywhere, a page that is not visible is a stub. If `page_types` is
+    /// not empty, only pages of those types are included, and no stubs (they have no type). Of
+    /// more than `max_nodes` matches, only the most-linked are returned.
+    pub fn wiki_graph(
+        &self,
+        page_types: &[String],
+        max_nodes: usize,
+        visibility: Visibility<'_>,
+    ) -> Result<WikiGraph> {
         let conn = self.conn();
-        let mut nodes: HashMap<String, (String, Option<String>, bool)> = HashMap::new();
-        let mut pages = conn.prepare("SELECT id, title, page_type FROM page")?;
+        let mut nodes: HashMap<String, (String, Option<String>, bool, Vec<String>)> =
+            HashMap::new();
+        let mut pages = conn.prepare(&format!(
+            "SELECT p.id, p.title, p.page_type, r.spheres FROM page p \
+             JOIN revision r ON r.page_id = p.id \
+             WHERE r.number = (SELECT max(number) FROM revision WHERE page_id = p.id) AND {}",
+            visibility.pages("p.id")
+        ))?;
         let mut rows = pages.query([])?;
         while let Some(row) = rows.next()? {
             let page_type: Option<String> = row.get(2)?;
             if page_types.is_empty() || page_type.as_ref().is_some_and(|t| page_types.contains(t)) {
                 nodes.insert(
                     format!("p:{}", row.get::<_, i64>(0)?),
-                    (row.get(1)?, page_type, false),
+                    (row.get(1)?, page_type, false, split_spheres(row.get(3)?)),
                 );
             }
         }
         if page_types.is_empty() {
-            // A stub shows as the first link to it wrote it, as in `related`.
+            // A stub shows as the first visible link to it wrote it, as in `related`.
             let mut stubs = conn.prepare(&format!(
                 "SELECT l.target_key, l.target_title FROM link l \
-                 WHERE l.target_key NOT IN (SELECT key FROM ({RESOLVED_KEYS})) \
-                 ORDER BY l.rowid"
+                 WHERE l.target_key NOT IN (SELECT key FROM ({})) AND {} \
+                 ORDER BY l.rowid",
+                visibility.resolved_keys(),
+                visibility.pages("l.source_page_id")
             ))?;
             let mut rows = stubs.query([])?;
             while let Some(row) = rows.next()? {
                 nodes
                     .entry(format!("s:{}", row.get::<_, String>(0)?))
-                    .or_insert((row.get(1)?, None, true));
+                    .or_insert((row.get(1)?, None, true, Vec::new()));
             }
         }
 
         let mut pairs = BTreeSet::new();
         let mut query = conn.prepare(&format!(
             "WITH {} SELECT a, b FROM edge WHERE a <> b",
-            edges(Visibility::All)
+            edges(visibility)
         ))?;
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
@@ -107,12 +125,13 @@ impl Knowledge {
 
         let mut ranked: Vec<_> = nodes
             .iter()
-            .map(|(id, (title, page_type, stub))| {
+            .map(|(id, (title, page_type, stub, spheres))| {
                 let node = GraphNode {
                     title: title.clone(),
                     page_type: page_type.clone(),
                     stub: *stub,
                     degree: degree.get(id.as_str()).copied().unwrap_or(0),
+                    spheres: spheres.clone(),
                 };
                 (id.as_str(), node)
             })
@@ -276,6 +295,7 @@ fn describe(
             page_type,
             stub: false,
             distance,
+            spheres: page_spheres(conn, id.parse().expect("page IDs are numbers"))?,
         })
     } else {
         let key = node.strip_prefix("s:").expect("node is a page or a stub");
@@ -294,6 +314,7 @@ fn describe(
             page_type: None,
             stub: true,
             distance,
+            spheres: Vec::new(),
         })
     }
 }

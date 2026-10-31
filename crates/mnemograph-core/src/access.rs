@@ -57,8 +57,14 @@ pub struct KnowledgeGap {
     pub last: String,
 }
 
-/// Access log entries as events for [`weekly_per_author`].
-const ACCESSES: &str = "event (author, created_at) AS (SELECT author, at FROM access)";
+/// Access log entries through registrations sharing a sphere with `visibility`, as events for
+/// [`weekly_per_author`].
+fn accesses(visibility: Visibility<'_>) -> String {
+    format!(
+        "event (author, created_at) AS (SELECT author, at FROM access WHERE {})",
+        visibility.accesses("id")
+    )
+}
 
 impl Knowledge {
     /// Records that `author`, through a registration with `spheres`, read, searched or
@@ -96,14 +102,16 @@ impl Knowledge {
         )?)
     }
 
-    /// Per agent, how often it read, searched and explored; most active first.
-    pub fn agent_access(&self) -> Result<Vec<AgentAccess>> {
+    /// Per agent, how often it read, searched and explored; most active first. With
+    /// [`Visibility::Within`], only what it did through registrations sharing a sphere counts.
+    pub fn agent_access(&self, visibility: Visibility<'_>) -> Result<Vec<AgentAccess>> {
         let conn = self.conn();
-        let mut query = conn.prepare(
+        let mut query = conn.prepare(&format!(
             "SELECT author, sum(tool = 'read_page'), sum(tool = 'search'), sum(tool = 'related'), \
                max(at) \
-             FROM access GROUP BY author ORDER BY count(*) DESC, max(at) DESC",
-        )?;
+             FROM access WHERE {} GROUP BY author ORDER BY count(*) DESC, max(at) DESC",
+            visibility.accesses("id")
+        ))?;
         let access = query
             .query_map([], |row| {
                 let author: String = row.get(0)?;
@@ -119,9 +127,10 @@ impl Knowledge {
         Ok(access)
     }
 
-    /// Reads, searches and explorations per week and agent, up to the current week.
-    pub fn weekly_access(&self) -> Result<WeeklyActivity> {
-        weekly_per_author(&self.conn(), ACCESSES, "now")
+    /// Reads, searches and explorations per week and agent, up to the current week, counted as
+    /// in [`Knowledge::agent_access`].
+    pub fn weekly_access(&self, visibility: Visibility<'_>) -> Result<WeeklyActivity> {
+        weekly_per_author(&self.conn(), &accesses(visibility), "now")
     }
 
     /// The pages agents read most, under their current titles (reads under an alias or an
