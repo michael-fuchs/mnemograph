@@ -1,5 +1,7 @@
 # Source files live in Garage, a self-hosted S3 store
 
+**Status:** superseded (2026-10-31): the document service indexes files where they are and keeps no copies, so no object store is needed.
+
 The original files of sources (uploads, fetched documents) are stored in Garage, a self-hosted S3-compatible object store running as its own container on a single node, rather than on mnemograph's local disk or as BLOBs in SQLite. Objects are content-addressed by SHA-256; metadata and extracted text stay in SQLite, which remains the source of truth for everything else. Garage gives future services (ADR 0004) the same storage and keeps the database small. mnemograph accesses it through the `object_store` crate, whose local filesystem and in-memory backends serve tests.
 
 ## Considered Options
