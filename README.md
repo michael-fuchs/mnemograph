@@ -55,14 +55,16 @@ Sphere names are lowercase letters, digits and `-`, start with a letter and have
 
 **Shared spheres.** A sphere with `readable_by = "all"` (the default is `"own"`) is read by every connection ([ADR 0009](docs/adr/0009-shared-spheres-are-read-by-every-connection.md)): its pages and notes are found, read, linked and explored like those of the connection's own spheres, and the instructions name it. Only connections that have it as their own create pages or notes in it, change its pages or add it to a page; for the others `write_page` answers that the page can be read but not changed. Notes of other spheres may link to a shared page; they stay in their own sphere. It is meant for what concerns every sphere, such as the page "Using mnemograph" (see [Filing conventions](#filing-conventions)); [`dev/spheres.toml`](dev/spheres.toml) has one, named `meta`. A shared sphere whose content must not enter the wiki shares nothing.
 
-**One connection per sphere set.** A connection is a pre-registered client at the OIDC provider. Its access tokens name its spheres as scopes `sphere:<name>`; give the client these scopes as default scopes, so that every token carries them. Scopes of spheres that are not configured are ignored, and a token without any configured sphere is refused (`403`, `insufficient_scope`). An agent installation that works in several sphere sets, such as work and private repositories on one machine, registers one client per set, and each repository's MCP configuration picks one:
+**One connection per sphere set.** A connection is a pre-registered client at the OIDC provider. Its access tokens name its spheres as scopes `sphere:<name>`; give the client these scopes as default scopes, so that every token carries them. Scopes of spheres that are not configured are ignored, and a token without any configured sphere is refused (`403`, `insufficient_scope`). An agent installation that works in several sphere sets, such as work and private repositories on one machine, registers one client per set, and each repository's MCP configuration picks one, **under a server name of its own**:
 
 ```sh
 # in a work repository
-claude mcp add -s project --transport http --client-id claude-code-work mnemograph https://<host>/mcp
+claude mcp add -s project --transport http --client-id claude-code-work mnemograph-work https://<host>/mcp
 # in a private repository
-claude mcp add -s project --transport http --client-id claude-code-private mnemograph https://<host>/mcp
+claude mcp add -s project --transport http --client-id claude-code-private mnemograph-private https://<host>/mcp
 ```
+
+Claude Code keeps an MCP server's login under its name and URL, not under its client ID. Connections that share the name (say, `mnemograph` everywhere) therefore share one token: whichever repository logged in last decides the spheres of all of them. With one name per connection each keeps its own login. The tools are then named after the server, e.g. `mcp__mnemograph-work__search`.
 
 **Upgrading.** A database from before spheres needs a sphere for its existing pages and notes. Start once with `--default-sphere <name>` (any command, e.g. `serve` or `reindex`); without it, the upgrade stops with an error and changes nothing. For `serve`, the default sphere must be configured and allowed in the wiki.
 
@@ -84,11 +86,11 @@ Then:
 ```sh
 set -a; . dev/rauthy/mnemograph.env; set +a   # includes MNEMOGRAPH_SPHERES=dev/spheres.toml
 cargo run -- serve
-claude mcp add --transport http --client-id claude-code-work mnemograph http://localhost:8080/mcp
-claude mcp login mnemograph
+claude mcp add --transport http --client-id claude-code-work mnemograph-work http://localhost:8080/mcp
+claude mcp login mnemograph-work
 ```
 
-To try the boundary, connect a second Claude Code session (for example in another directory, with `-s project`) through `claude-code-private`: pages written through one are not found through the other.
+To try the boundary, connect a second Claude Code session (for example in another directory, with `-s project`) through `claude-code-private`, named `mnemograph-private` (see [Spheres](#spheres) for why the name matters): pages written through one are not found through the other.
 
 Log in as `admin@localhost` in the browser that opens. Claude Code closes its callback listener right after receiving the code, so the browser may afterwards show a connection error even though the terminal reports "Authenticated". If the browser cannot reach the callback at all, paste the URL from its address bar into the terminal prompt within a minute.
 
@@ -118,7 +120,7 @@ Access tokens must be signed by the issuer, have `typ: at+jwt`, carry `<public-u
 claude mcp add --transport http mnemograph http://localhost:8080/mcp
 ```
 
-(With authentication, add `--client-id` with the connection's client, see [Spheres](#spheres).) Claude Code then has these tools:
+(With authentication, add `--client-id` with the connection's client and name the server after the connection, e.g. `mnemograph-work`; see [Spheres](#spheres).) Claude Code then has these tools:
 
 - `write_page`: create a page from a title and a Markdown body, or change one by sending the complete new body with the revision it is based on. Optionally sets the page type, the aliases, a new title (the old title stays an alias), for a new page its sphere, and the page's spheres among the connection's own. `[[Title]]` and `[[Title|label]]` link to other pages; a title no page has yet is a stub.
 - `read_page`: read a page by title or alias, with its current revision, the titles it links to, the pages linking to it and its most recent notes.
@@ -130,12 +132,12 @@ Titles and aliases are compared case-insensitively, with whitespace collapsed.
 
 ### Telling agents to use it
 
-mnemograph sends usage instructions to every agent that connects. To make an agent use it as *the* memory for a repository, add this to the repository's `CLAUDE.md` (or `AGENTS.md`) and replace `<project>` with the title of the project's page:
+mnemograph sends usage instructions to every agent that connects. To make an agent use it as *the* memory for a repository, add this to the repository's `CLAUDE.md` (or `AGENTS.md`), replacing `<server>` with the name of the repository's connection (e.g. `mnemograph-work`) and `<project>` with the title of the project's page:
 
 ```markdown
 ## Memory
 
-This project's long-term memory is the `mnemograph` MCP server; its page for this project is `<project>`.
+This project's long-term memory is mnemograph, the MCP server `<server>`; its page for this project is `<project>`.
 Use it instead of local memory files.
 
 - Before starting a task, search mnemograph for the task's subject and read the `<project>` page.
