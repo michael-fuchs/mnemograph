@@ -244,10 +244,11 @@ Rauthy is ready at $RAUTHY_URL (admin UI: $RAUTHY_URL/auth/v1/admin)
 
 Next:
   set -a; . dev/rauthy/mnemograph.env; set +a; cargo run -- serve
-  # one connection per repository, e.g. in a work repository (-s project writes .mcp.json):
-  claude mcp add -s project --transport http --client-id claude-code-work mnemograph $MNEMOGRAPH_RESOURCE
+  # one connection per repository, each under its own server name (Claude Code keeps one login
+  # per name and URL), e.g. in a work repository (-s project writes .mcp.json):
+  claude mcp add -s project --transport http --client-id claude-code-work mnemograph-work $MNEMOGRAPH_RESOURCE
   # and in a private one:
-  claude mcp add -s project --transport http --client-id claude-code-private mnemograph $MNEMOGRAPH_RESOURCE
-  claude mcp login mnemograph      # or /mcp inside a Claude Code session
+  claude mcp add -s project --transport http --client-id claude-code-private mnemograph-private $MNEMOGRAPH_RESOURCE
+  claude mcp login mnemograph-work      # or /mcp inside a Claude Code session
   open $MNEMOGRAPH_URL/ in the browser and log in as $ADMIN_EMAIL
 DONE
