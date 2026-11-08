@@ -15,8 +15,8 @@ use mnemograph::{AppConfig, AuthSettings, Authenticator};
 use mnemograph_core::{Author, Knowledge};
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, CallToolResult},
-    service::{RoleClient, RunningService},
+    model::{CallToolRequestParams, CallToolResult, ProtocolVersion},
+    service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -150,13 +150,25 @@ impl TestServer {
 
     /// Connects an MCP client whose token has these scopes.
     async fn client_with_scope(&self, keys: &Keys, scope: &str) -> RunningService<RoleClient, ()> {
+        self.client_with_lifecycle(keys, scope, ClientLifecycleMode::Initialize)
+            .await
+    }
+
+    /// Connects an MCP client whose token has these scopes, opening the session either with
+    /// `initialize` or with `server/discover` (the protocol from 2026-07-28 on).
+    async fn client_with_lifecycle(
+        &self,
+        keys: &Keys,
+        scope: &str,
+        lifecycle: ClientLifecycleMode,
+    ) -> RunningService<RoleClient, ()> {
         let mut claims = self.valid_claims();
         claims["scope"] = json!(scope);
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", self.base))
                 .auth_header(keys.token("at+jwt", claims)),
         );
-        ().serve(transport).await.unwrap()
+        ().serve_with_lifecycle(transport, lifecycle).await.unwrap()
     }
 
     /// Sends a raw MCP request and returns status, WWW-Authenticate header and body.
@@ -721,4 +733,57 @@ async fn changing_spheres_keeps_those_the_connection_cannot_see() {
     assert_eq!(structured(&moved)["spheres"], json!(["work"]));
     let gone = error_text(&call(&private, "read_page", json!({ "title": "Rust" })).await);
     assert!(gone.contains("no page titled"), "{gone}");
+}
+
+#[tokio::test]
+async fn instructions_name_the_connections_spheres_and_only_its_usage_page() {
+    let keys = Keys::generate();
+    let server = TestServer::start(&keys).await;
+    let private = server
+        .client_with_scope(&keys, "mnemograph sphere:private")
+        .await;
+    call(
+        &private,
+        "write_page",
+        json!({ "title": "Using mnemograph", "body": "Hub pages first." }),
+    )
+    .await;
+
+    // Both ways of opening a session: clients on the newer protocol never send `initialize`.
+    for lifecycle in [
+        ClientLifecycleMode::Initialize,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    ] {
+        let instructions = |scope| {
+            let lifecycle = lifecycle.clone();
+            let (server, keys) = (&server, &keys);
+            async move {
+                let client = server.client_with_lifecycle(keys, scope, lifecycle).await;
+                client
+                    .peer_info()
+                    .and_then(|info| info.instructions.clone())
+                    .unwrap_or_default()
+            }
+        };
+
+        let work = instructions("mnemograph sphere:work").await;
+        assert!(
+            work.starts_with("This connection's spheres: work."),
+            "{lifecycle:?}: {work}"
+        );
+        // The usage page lies in another sphere: no hint, not even its title.
+        assert!(!work.contains("Using mnemograph"), "{lifecycle:?}: {work}");
+
+        let private = instructions("mnemograph sphere:private").await;
+        assert!(
+            private.starts_with("This connection's spheres: private."),
+            "{lifecycle:?}: {private}"
+        );
+        assert!(
+            private.contains(r#"Start here: the page "Using mnemograph""#),
+            "{lifecycle:?}: {private}"
+        );
+    }
 }

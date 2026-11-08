@@ -10,7 +10,8 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{common::Extension, router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerConfig,
+        DiscoverResult, Implementation, InitializeRequestParams, InitializeResult,
+        ServerCapabilities, ServerConfig,
     },
     schemars,
     service::RequestContext,
@@ -499,21 +500,22 @@ impl McpServer {
         self.changes.send_modify(|count| *count += 1);
     }
 
-    /// The instructions for a caller, naming its spheres if it is known.
+    /// The instructions for a caller, starting with its spheres. Without a known caller they
+    /// name no spheres and give no usage page hint, so nothing is revealed across spheres.
     fn instructions(&self, caller: Option<&Identity>) -> String {
-        let (visibility, connection) = match caller {
+        let (connection, hint) = match caller {
             Some(caller) => (
-                Visibility::Within(&caller.spheres),
                 format!(
-                    " This connection's spheres: {}.",
+                    "This connection's spheres: {}. It sees and changes only pages and notes in \
+                     them.\n\n",
                     caller.spheres.names().join(", ")
                 ),
+                self.usage_hint(Visibility::Within(&caller.spheres)),
             ),
-            None => (Visibility::All, String::new()),
+            None => (String::new(), String::new()),
         };
         format!(
-            "{ABOUT}\n\n{}{INSTRUCTIONS}\n\n{SPHERES}{connection}\n\nAllowed page types: {}.",
-            self.usage_hint(visibility),
+            "{connection}{ABOUT}\n\n{hint}{INSTRUCTIONS}\n\n{SPHERES}\n\nAllowed page types: {}.",
             self.knowledge.page_types().join(", ")
         )
     }
@@ -554,13 +556,32 @@ impl ServerHandler for McpServer {
     ) -> Result<InitializeResult, ErrorData> {
         context.peer.set_peer_info(request.clone());
         let mut result = self.negotiate_initialize(&request)?;
-        let caller = context
-            .extensions
-            .get::<http::request::Parts>()
-            .and_then(|request| request.extensions.get::<Identity>());
-        result.instructions = Some(self.instructions(caller));
+        result.instructions = Some(self.instructions(connected(&context)));
         Ok(result)
     }
+
+    /// Like `initialize`, for clients on the protocol without it (2026-07-28 and later). The
+    /// result stays private to the caller's authorization, since the instructions depend on it.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        let mut info = self.get_info();
+        info.instructions = Some(self.instructions(connected(&context)));
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            info,
+        ))
+    }
+}
+
+/// The identity the authentication middleware attached to the HTTP request that opens the
+/// session.
+fn connected(context: &RequestContext<RoleServer>) -> Option<&Identity> {
+    context
+        .extensions
+        .get::<http::request::Parts>()
+        .and_then(|request| request.extensions.get::<Identity>())
 }
 
 /// Records a read, search or exploration in the access log, with the spheres of the caller's
