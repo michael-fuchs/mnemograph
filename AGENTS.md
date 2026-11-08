@@ -25,7 +25,7 @@ v1 is implemented for local use (agents via MCP with OAuth, owner web UI, CLI); 
 ## Design constraints to preserve
 
 - Agents never delete; deletion is owner-only (CLI in v1).
-- An agent sees and changes only pages and notes of its registration's spheres; the boundary is enforced in the core, never left to the agent.
+- An agent sees and changes only pages and notes of its registration's spheres; the boundary is enforced in the core, never left to the agent. Shared spheres (ADR 0009) are the one exception for reading: every registration reads them, only their own change them.
 - Every revision and note records its author from the token, never from request content.
 - No free-form query language exposed to agents.
 - Keep the MCP tool surface small (`search`, `read_page`, `write_page`, `add_note`, `related`); no feature creep toward a Notion/Outline clone.

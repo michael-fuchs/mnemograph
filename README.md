@@ -53,6 +53,8 @@ description = "Family, home, finances"
 
 Sphere names are lowercase letters, digits and `-`, start with a letter and have at most 32 characters. Of the sphere rules (`[spheres.<name>.rules]`), mnemograph applies `wiki`: a sphere with `wiki = "never"` must not enter the wiki. Nothing new can be put into it (writes naming it are refused with a message saying so), a token's scope for it is ignored, and a connection made only of such spheres is refused (`403`). What such a sphere already holds stays, and `serve` refuses to start if every sphere is forbidden. The rule `llm` is not used yet.
 
+**Shared spheres.** A sphere with `readable_by = "all"` (the default is `"own"`) is read by every connection ([ADR 0009](docs/adr/0009-shared-spheres-are-read-by-every-connection.md)): its pages and notes are found, read, linked and explored like those of the connection's own spheres, and the instructions name it. Only connections that have it as their own create pages or notes in it, change its pages or add it to a page; for the others `write_page` answers that the page can be read but not changed. Notes of other spheres may link to a shared page; they stay in their own sphere. It is meant for what concerns every sphere, such as the page "Using mnemograph" (see [Filing conventions](#filing-conventions)); [`dev/spheres.toml`](dev/spheres.toml) has one, named `meta`. A shared sphere whose content must not enter the wiki shares nothing.
+
 **One connection per sphere set.** A connection is a pre-registered client at the OIDC provider. Its access tokens name its spheres as scopes `sphere:<name>`; give the client these scopes as default scopes, so that every token carries them. Scopes of spheres that are not configured are ignored, and a token without any configured sphere is refused (`403`, `insufficient_scope`). An agent installation that works in several sphere sets, such as work and private repositories on one machine, registers one client per set, and each repository's MCP configuration picks one:
 
 ```sh
@@ -74,7 +76,7 @@ dev/setup-rauthy.sh
 
 It generates a local config with random secrets in `dev/rauthy/` (git-ignored; the admin password is in `dev/rauthy/secrets.env`), starts Rauthy on `http://localhost:8180`, and registers:
 
-- the scopes `mnemograph`, `sphere:work` and `sphere:private`, and three public clients for agents, one connection per sphere set of [`dev/spheres.toml`](dev/spheres.toml): `claude-code-work` (work), `claude-code-private` (private) and `claude-code` (both, so it must name a sphere when creating),
+- the scopes `mnemograph`, `sphere:work`, `sphere:private` and `sphere:meta`, and four public clients for agents, one connection per sphere set of [`dev/spheres.toml`](dev/spheres.toml): `claude-code-work` (work), `claude-code-private` (private), `claude-code` (both, so it must name a sphere when creating) and `claude-code-meta` (the shared sphere meta, which the others only read),
 - the group `mnemograph_owner` with the admin in it, and the confidential client `mnemograph-web` for the web UI; mnemograph's settings for it go to `dev/rauthy/mnemograph.env`.
 
 Then:
@@ -146,7 +148,7 @@ Use it instead of local memory files.
 
 How knowledge is structured (hub pages per project with a timeline, decision pages, notes versus pages) is up to you, so it lives in mnemograph itself: on the page **Using mnemograph**. As soon as that page exists, the instructions every agent receives on connecting tell it to read the page before its first write; renaming the page keeps working, since the old title stays an alias. Edit it like any other page to change the conventions.
 
-A fresh installation has no such page. [`docs/using-mnemograph.md`](docs/using-mnemograph.md) is a starting point: ask an agent to create the page from it.
+A fresh installation has no such page. [`docs/using-mnemograph.md`](docs/using-mnemograph.md) is a starting point: ask an agent to create the page from it. Put it into a [shared sphere](#spheres), by creating it through a connection of that sphere, so that every connection reads it and only that connection changes it.
 
 ## Container image
 

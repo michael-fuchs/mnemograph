@@ -2,7 +2,8 @@
 //!
 //! Every page and note carries one or more spheres. An agent's registration is bound to a set
 //! of spheres; through it, the agent sees only what shares a sphere with that set, and what it
-//! creates gets one of them.
+//! creates gets one of them. Shared spheres are readable through every registration, but only
+//! registrations that have them as their own change what they hold.
 
 use crate::{Author, Error, Result};
 
@@ -138,12 +139,48 @@ impl Visibility<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Writer {
     pub author: Author,
+    /// The registration's own spheres: what the writer creates and changes.
     pub spheres: Spheres,
+    /// The own spheres and the shared ones: what the writer sees.
+    readable: Spheres,
 }
 
 impl Writer {
+    /// A writer that sees only its own spheres.
+    pub fn new(author: Author, spheres: Spheres) -> Self {
+        Self {
+            author,
+            readable: spheres.clone(),
+            spheres,
+        }
+    }
+
+    /// Lets the writer also read these shared spheres, without changing what they hold.
+    pub fn with_shared(mut self, shared: &[String]) -> Self {
+        let names = self.readable.names().iter().chain(shared).cloned();
+        self.readable = Spheres::new(names).expect("valid names, at least the own spheres");
+        self
+    }
+
+    /// The shared spheres the writer reads but does not have as its own, sorted.
+    pub fn shared(&self) -> Vec<String> {
+        self.readable
+            .names()
+            .iter()
+            .filter(|s| !self.spheres.contains(s))
+            .cloned()
+            .collect()
+    }
+
+    /// What the writer sees: its own spheres and the shared ones.
     pub fn visibility(&self) -> Visibility<'_> {
-        Visibility::Within(&self.spheres)
+        Visibility::Within(&self.readable)
+    }
+
+    /// True if the writer may change something carrying `spheres`: it shares one of the
+    /// writer's own spheres, not only a shared one.
+    pub fn may_change(&self, spheres: &[String]) -> bool {
+        Visibility::Within(&self.spheres).sees(spheres)
     }
 }
 
@@ -198,6 +235,23 @@ mod tests {
         let err = two.choose(None).unwrap_err();
         assert!(matches!(err, Error::SphereRequired(_)));
         assert!(err.to_string().contains("private, work"), "{err}");
+    }
+
+    #[test]
+    fn shared_spheres_are_seen_but_not_changed() {
+        let work = Spheres::new(["work"]).unwrap();
+        let writer = Writer::new(Author::Agent("a".into()), work).with_shared(&["meta".into()]);
+        assert_eq!(writer.shared(), ["meta"]);
+        assert!(writer.visibility().sees(&["meta".into()]));
+        assert!(!writer.may_change(&["meta".into()]));
+        assert!(writer.may_change(&["meta".into(), "work".into()]));
+        assert!(!writer.visibility().sees(&["private".into()]));
+
+        // A shared sphere that is also the writer's own is simply its own.
+        let meta = Spheres::new(["meta"]).unwrap();
+        let steward = Writer::new(Author::Agent("b".into()), meta).with_shared(&["meta".into()]);
+        assert!(steward.shared().is_empty());
+        assert!(steward.may_change(&["meta".into()]));
     }
 
     #[test]

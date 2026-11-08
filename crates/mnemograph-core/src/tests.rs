@@ -17,10 +17,7 @@ fn writer() -> Writer {
 }
 
 fn writer_as(author: &Author) -> Writer {
-    Writer {
-        author: author.clone(),
-        spheres: Spheres::new([SPHERE]).unwrap(),
-    }
+    Writer::new(author.clone(), Spheres::new([SPHERE]).unwrap())
 }
 
 fn knowledge() -> Knowledge {
@@ -1980,10 +1977,7 @@ fn spheres(names: &[&str]) -> Spheres {
 }
 
 fn writer_in(names: &[&str]) -> Writer {
-    Writer {
-        author: author(),
-        spheres: spheres(names),
-    }
+    Writer::new(author(), spheres(names))
 }
 
 fn create_in(knowledge: &Knowledge, sphere: &str, title: &str, body: &str) -> Page {
@@ -2003,10 +1997,7 @@ fn add_sphere(knowledge: &Knowledge, title: &str, sphere: &str) {
     let page = knowledge.page(title, ALL).unwrap().unwrap();
     let mut spheres = page.spheres.clone();
     spheres.push(sphere.to_owned());
-    let writer = Writer {
-        author: author(),
-        spheres: Spheres::new(spheres.clone()).unwrap(),
-    };
+    let writer = Writer::new(author(), Spheres::new(spheres.clone()).unwrap());
     let changes = PageChanges {
         spheres: Some(spheres),
         ..Default::default()

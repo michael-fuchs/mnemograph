@@ -13,6 +13,12 @@ description = "Employer, projects, colleagues"
 [spheres.private]
 description = "Family, home, finances"
 
+# Read by every connection, changed only through its own: the owner's conventions, such as the
+# page "Using mnemograph".
+[spheres.meta]
+description = "How the wiki itself is used"
+rules = { readable_by = "all" }
+
 # Sphere rules may follow each sphere:
 # [spheres.private.rules]
 # wiki = "allowed"   # or "never": the sphere's content must not enter the wiki; mnemograph
@@ -20,3 +26,5 @@ description = "Family, home, finances"
 #                    # spheres
 # llm = ["mistral"]  # the only LLM providers that may receive the sphere's content (not used
 #                    # by mnemograph yet)
+# readable_by = "own"  # or "all": every connection reads the sphere's content, but only
+#                      # connections that have the sphere change it

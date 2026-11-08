@@ -86,6 +86,12 @@ pub enum Error {
     SphereForbidden(String),
     #[error("give either sphere or spheres, not both")]
     SphereAndSpheres,
+    /// The page lies only in shared spheres, which the writer reads but does not have as its own.
+    #[error(
+        "the page {title:?} belongs to the shared spheres {}, which this connection can read but not change",
+        .spheres.join(", ")
+    )]
+    ReadOnly { title: String, spheres: Vec<String> },
     /// The name belongs to a page the writer cannot see. The error must not reveal more.
     #[error("the title {0:?} is not available; choose another one")]
     TitleUnavailable(String),
@@ -512,6 +518,13 @@ impl Knowledge {
                 return Err(match base_revision {
                     Some(_) => Error::PageNotFound(title),
                     None => Error::TitleUnavailable(title),
+                });
+            }
+            Some(page_id) if !writer.may_change(&page_spheres(&tx, page_id)?) => {
+                let current = current_page(&tx, page_id)?;
+                return Err(Error::ReadOnly {
+                    title: current.title,
+                    spheres: current.spheres,
                 });
             }
             None => {

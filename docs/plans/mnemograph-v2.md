@@ -1,6 +1,6 @@
 # Plan: mnemograph v2
 
-The second round of features, revised on 2026-10-31. The first version of this plan (2026-10-29) put chat, document import and file storage into mnemograph. The owner then decided to build a personal assistant of independent services, one per kind of thing, sharing an identity provider, a reverse proxy, an LLM gateway and a central configuration of spheres. mnemograph is the wiki and agent memory among them. That architecture is documented privately with the server's infrastructure; this plan covers what it means for mnemograph. Vocabulary follows `GLOSSARY.md`; decisions are in `docs/adr/` (0008 is new; 0005–0007 are superseded).
+The second round of features, revised on 2026-10-31. The first version of this plan (2026-10-29) put chat, document import and file storage into mnemograph. The owner then decided to build a personal assistant of independent services, one per kind of thing, sharing an identity provider, a reverse proxy, an LLM gateway and a central configuration of spheres. mnemograph is the wiki and agent memory among them. That architecture is documented privately with the server's infrastructure; this plan covers what it means for mnemograph. Vocabulary follows `GLOSSARY.md`; decisions are in `docs/adr/` (0008 and 0009 are new; 0005–0007 are superseded).
 
 ## Done
 
@@ -20,6 +20,7 @@ The second round of features, revised on 2026-10-31. The first version of this p
   - Changing a page keeps its spheres unless the agent changes them within its own.
 - **Links to invisible pages** show as stubs.
 - **Sphere rules:** the owner's central configuration lists the spheres and their rules. A sphere whose content must not enter the wiki is refused.
+- **Shared spheres** ([ADR 0009](../adr/0009-shared-spheres-are-read-by-every-connection.md), #53): a sphere with `readable_by = "all"` is read by every registration and changed only through its own; the owner's conventions page lives in one.
 - **Existing content:** existing pages and notes get a default sphere chosen at the upgrade.
 
 ## Shared crates

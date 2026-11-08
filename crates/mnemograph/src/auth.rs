@@ -37,6 +37,8 @@ pub struct Identity {
     pub author: Author,
     /// The spheres of the agent's registration (all spheres without authentication).
     pub spheres: Spheres,
+    /// Shared spheres the agent reads besides its own, but does not change.
+    pub shared: Vec<String>,
 }
 
 /// How mnemograph checks tokens.
@@ -54,6 +56,9 @@ pub struct AuthSettings {
     /// Configured spheres whose rule keeps their content out of the wiki: tokens naming them
     /// cannot use them.
     pub forbidden_spheres: Vec<String>,
+    /// Usable spheres that every agent reads (rule `readable_by = "all"`); only tokens naming
+    /// them change what they hold.
+    pub shared_spheres: Vec<String>,
 }
 
 impl AuthSettings {
@@ -137,6 +142,7 @@ mod tests {
             required_scopes: vec![],
             spheres: Spheres::new(["work"]).unwrap(),
             forbidden_spheres: vec![],
+            shared_spheres: vec![],
         }
     }
 
@@ -359,9 +365,17 @@ impl Authenticator {
             }
         })?;
         tracing::debug!(%client, sub = ?claims.sub, spheres = ?spheres.names(), "authenticated agent");
+        let shared = self
+            .settings
+            .shared_spheres
+            .iter()
+            .filter(|s| !spheres.contains(s))
+            .cloned()
+            .collect();
         Ok(Identity {
             author: Author::Agent(client),
             spheres,
+            shared,
         })
     }
 
@@ -481,6 +495,7 @@ pub async fn anonymous(
     request.extensions_mut().insert(Identity {
         author: Author::Anonymous,
         spheres,
+        shared: Vec::new(),
     });
     next.run(request).await
 }

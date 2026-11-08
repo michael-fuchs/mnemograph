@@ -76,21 +76,34 @@ struct TestServer {
 
 impl TestServer {
     async fn start(keys: &Keys) -> Self {
-        Self::start_with_forbidden(keys, &[]).await
+        Self::start_with_rules(keys, &[], &[]).await
+    }
+
+    async fn start_with_forbidden(keys: &Keys, forbidden: &[&str]) -> Self {
+        Self::start_with_rules(keys, forbidden, &[]).await
     }
 
     /// Configures the spheres work and private, and besides them `forbidden`, whose rule keeps
-    /// them out of the wiki.
-    async fn start_with_forbidden(keys: &Keys, forbidden: &[&str]) -> Self {
+    /// them out of the wiki, and `shared`, which every connection reads.
+    async fn start_with_rules(keys: &Keys, forbidden: &[&str], shared: &[&str]) -> Self {
         let forbidden: Vec<String> = forbidden.iter().map(|s| s.to_string()).collect();
+        let shared: Vec<String> = shared.iter().map(|s| s.to_string()).collect();
+        let usable = mnemograph_core::Spheres::new(
+            ["work", "private"]
+                .iter()
+                .copied()
+                .chain(shared.iter().map(String::as_str)),
+        )
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let settings = AuthSettings {
             issuer: ISSUER.into(),
             resource: format!("{base}/mcp"),
             required_scopes: vec!["mnemograph".into()],
-            spheres: mnemograph_core::Spheres::new(["work", "private"]).unwrap(),
+            spheres: usable.clone(),
             forbidden_spheres: forbidden.clone(),
+            shared_spheres: shared,
         };
         let authenticator = Authenticator::with_keys(
             settings,
@@ -111,7 +124,7 @@ impl TestServer {
             knowledge.clone(),
             AppConfig {
                 auth: Some(Arc::new(authenticator)),
-                spheres: mnemograph_core::Spheres::new(["work", "private"]).unwrap(),
+                spheres: usable,
                 allowed_hosts: vec!["127.0.0.1".into()],
                 limits: Default::default(),
                 web_login: None,
@@ -786,4 +799,171 @@ async fn instructions_name_the_connections_spheres_and_only_its_usage_page() {
             "{lifecycle:?}: {private}"
         );
     }
+}
+
+#[tokio::test]
+async fn every_connection_reads_a_shared_sphere_but_only_its_own_connection_changes_it() {
+    let keys = Keys::generate();
+    let server = TestServer::start_with_rules(&keys, &[], &["meta"]).await;
+    let meta = server
+        .client_with_scope(&keys, "mnemograph sphere:meta")
+        .await;
+    let work = server
+        .client_with_scope(&keys, "mnemograph sphere:work")
+        .await;
+
+    let created = call(
+        &meta,
+        "write_page",
+        json!({ "title": "Using mnemograph", "body": "Hub pages first. See [[Filing]]." }),
+    )
+    .await;
+    assert_eq!(structured(&created)["spheres"], json!(["meta"]));
+    let revision = structured(&created)["revision"].clone();
+
+    // Reading: the page, search, related and links from the connection's own pages.
+    let read = call(&work, "read_page", json!({ "title": "Using mnemograph" })).await;
+    assert_eq!(
+        structured(&read)["body"],
+        "Hub pages first. See [[Filing]]."
+    );
+    let search = call(&work, "search", json!({ "query": "hub" })).await;
+    assert_eq!(structured(&search)["hits"][0]["title"], "Using mnemograph");
+    call(
+        &work,
+        "write_page",
+        json!({ "title": "Setup", "body": "Filed as in [[Using mnemograph]]." }),
+    )
+    .await;
+    let setup = call(&work, "read_page", json!({ "title": "Setup" })).await;
+    assert_eq!(
+        structured(&setup)["links"],
+        json!([{ "title": "Using mnemograph", "stub": false }])
+    );
+    let related = call(&work, "related", json!({ "title": "Setup" })).await;
+    assert_eq!(
+        structured(&related)["related"][0]["title"],
+        "Using mnemograph"
+    );
+
+    // Writing: refused for the page, for its title, and for the sphere itself.
+    let change = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Using mnemograph", "body": "Mine now.", "base_revision": revision }),
+        )
+        .await,
+    );
+    assert!(
+        change.contains("shared spheres meta") && change.contains("not change"),
+        "{change}"
+    );
+    let create = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Using mnemograph", "body": "Another." }),
+        )
+        .await,
+    );
+    assert!(create.contains("not change"), "{create}");
+    let into_meta = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({ "title": "Conventions", "body": "", "sphere": "meta" }),
+        )
+        .await,
+    );
+    assert!(into_meta.contains("not available"), "{into_meta}");
+    let setup_revision = structured(&setup)["revision"].clone();
+    let share = error_text(
+        &call(
+            &work,
+            "write_page",
+            json!({
+                "title": "Setup",
+                "body": "Filed as in [[Using mnemograph]].",
+                "base_revision": setup_revision,
+                "spheres": ["work", "meta"],
+            }),
+        )
+        .await,
+    );
+    assert!(share.contains("not available"), "{share}");
+    let note_in_meta = error_text(
+        &call(
+            &work,
+            "add_note",
+            json!({ "body": "A rule for [[Using mnemograph]].", "sphere": "meta" }),
+        )
+        .await,
+    );
+    assert!(note_in_meta.contains("not available"), "{note_in_meta}");
+
+    // A note from work may link to the shared page; it stays in work, hidden from meta.
+    let note = call(
+        &work,
+        "add_note",
+        json!({ "body": "Missing a rule in [[Using mnemograph]]." }),
+    )
+    .await;
+    assert_eq!(structured(&note)["spheres"], json!(["work"]));
+    let seen_by_work = call(&work, "read_page", json!({ "title": "Using mnemograph" })).await;
+    assert_eq!(
+        structured(&seen_by_work)["notes"].as_array().unwrap().len(),
+        1
+    );
+    let seen_by_meta = call(&meta, "read_page", json!({ "title": "Using mnemograph" })).await;
+    assert_eq!(structured(&seen_by_meta)["notes"], json!([]));
+    assert_eq!(structured(&seen_by_meta)["backlinks"], json!([]));
+
+    // The meta connection changes its page, and sees nothing of work.
+    let changed = call(
+        &meta,
+        "write_page",
+        json!({ "title": "Using mnemograph", "body": "Hub pages first.", "base_revision": revision }),
+    )
+    .await;
+    assert_eq!(structured(&changed)["body"], "Hub pages first.");
+    let hidden = error_text(&call(&meta, "read_page", json!({ "title": "Setup" })).await);
+    assert!(hidden.contains("no page titled"), "{hidden}");
+
+    // The access log records the reader's own spheres, not the shared one: of the three
+    // reads of the page, one was through meta.
+    let reads = |visibility| {
+        server
+            .knowledge
+            .most_read_pages(10, visibility)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.title == "Using mnemograph")
+            .map(|p| p.reads)
+    };
+    let meta_spheres = mnemograph_core::Spheres::new(["meta"]).unwrap();
+    assert_eq!(reads(mnemograph_core::Visibility::All), Some(3));
+    assert_eq!(
+        reads(mnemograph_core::Visibility::Within(&meta_spheres)),
+        Some(1)
+    );
+
+    // Instructions: the shared sphere is named, and the usage hint reaches every connection.
+    let instructions = server
+        .client_with_scope(&keys, "mnemograph sphere:work")
+        .await
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .unwrap_or_default();
+    assert!(
+        instructions.starts_with(
+            "This connection's spheres: work. It sees and changes only pages and notes in them, \
+             and reads the shared spheres meta without changing them."
+        ),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains(r#"Start here: the page "Using mnemograph""#),
+        "{instructions}"
+    );
 }

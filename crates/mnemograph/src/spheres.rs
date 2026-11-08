@@ -2,8 +2,8 @@
 //!
 //! The file is generated from the central configuration and mounted read-only. Its format is
 //! the central configuration's (version 1): a table `spheres` with one table per sphere. Of the
-//! sphere rules, mnemograph applies `wiki`; keys it does not use, such as the rule `llm`, are
-//! ignored.
+//! sphere rules, mnemograph applies `wiki` and `readable_by`; keys it does not use, such as the
+//! rule `llm`, are ignored.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -37,6 +37,9 @@ pub struct Rules {
     /// Whether the sphere's content may enter the wiki.
     #[serde(default)]
     pub wiki: WikiRule,
+    /// Which connections read the sphere's content.
+    #[serde(default)]
+    pub readable_by: ReadableBy,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -46,6 +49,16 @@ pub enum WikiRule {
     Allowed,
     /// The sphere's content must not enter the wiki.
     Never,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadableBy {
+    /// Only connections that have the sphere.
+    #[default]
+    Own,
+    /// Every connection; only those that have the sphere change its content.
+    All,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +113,18 @@ impl SphereConfig {
         .ok()
     }
 
+    /// The usable spheres that every connection reads (`readable_by = "all"`).
+    pub fn shared(&self) -> Vec<String> {
+        self.spheres
+            .iter()
+            .filter(|(_, sphere)| {
+                sphere.rules.readable_by == ReadableBy::All
+                    && sphere.rules.wiki == WikiRule::Allowed
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// The spheres whose rule keeps their content out of the wiki.
     pub fn forbidden(&self) -> Vec<String> {
         self.spheres
@@ -117,8 +142,9 @@ mod tests {
     #[test]
     fn reads_the_rendered_part_of_the_central_configuration() {
         let config = SphereConfig::parse(include_str!("../../../dev/spheres.toml")).unwrap();
-        assert_eq!(config.names().names(), ["private", "work"]);
+        assert_eq!(config.names().names(), ["meta", "private", "work"]);
         assert!(config.spheres["work"].description.is_some());
+        assert_eq!(config.shared(), ["meta"]);
     }
 
     #[test]
@@ -143,6 +169,29 @@ mod tests {
         let err = SphereConfig::parse("version = 1\n[spheres.work.rules]\nwiki = \"maybe\"\n")
             .unwrap_err();
         assert!(format!("{err:#}").contains("maybe"), "{err:#}");
+    }
+
+    #[test]
+    fn reads_the_readable_by_rule() {
+        let config = SphereConfig::parse(
+            r#"
+            version = 1
+            [spheres.meta]
+            rules = { readable_by = "all" }
+            [spheres.work]
+            rules = { readable_by = "own" }
+            [spheres.closed]
+            rules = { wiki = "never", readable_by = "all" }
+            [spheres.private]
+            "#,
+        )
+        .unwrap();
+        // A sphere kept out of the wiki shares nothing.
+        assert_eq!(config.shared(), ["meta"]);
+        let err =
+            SphereConfig::parse("version = 1\n[spheres.meta.rules]\nreadable_by = \"everyone\"\n")
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("everyone"), "{err:#}");
     }
 
     #[test]

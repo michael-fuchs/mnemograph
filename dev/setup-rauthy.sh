@@ -2,9 +2,10 @@
 # Sets up Rauthy locally for mnemograph development:
 #   1. generates dev/rauthy/config.toml and the bootstrap API key (once; git-ignored),
 #   2. starts Rauthy on http://localhost:8180,
-#   3. creates the scopes "mnemograph", "sphere:work" and "sphere:private" and the pre-registered
-#      public clients (connections) for agents: "claude-code-work" and "claude-code-private" with
-#      one sphere each, and "claude-code" with both (the spheres are in dev/spheres.toml),
+#   3. creates the scopes "mnemograph", "sphere:work", "sphere:private" and "sphere:meta" and the
+#      pre-registered public clients (connections) for agents: "claude-code-work",
+#      "claude-code-private" and "claude-code-meta" with one sphere each, and "claude-code" with
+#      work and private (the spheres are in dev/spheres.toml; every connection reads meta),
 #   4. creates the owner group "mnemograph_owner" with the admin in it and the web UI's
 #      confidential client "mnemograph-web"; its secret goes to dev/rauthy/mnemograph.env.
 # Safe to run again: existing config, scope and client are kept or updated.
@@ -115,7 +116,7 @@ fi
 
 # A token's scope "sphere:<name>" lets its connection use that sphere of dev/spheres.toml.
 existing_scopes="$(curl -sf "$RAUTHY_URL/auth/v1/scopes" -H "Authorization: API-Key $API_KEY")"
-for scope in mnemograph sphere:work sphere:private; do
+for scope in mnemograph sphere:work sphere:private sphere:meta; do
   if ! jq -e --arg s "$scope" '.[] | select(.name == $s)' <<< "$existing_scopes" > /dev/null; then
     status="$(api POST /scopes "$(jq -n --arg s "$scope" '{scope: $s}')")"
     [[ "$status" == 200 ]] || { echo "creating the scope $scope failed: HTTP $status" >&2; exit 1; }
@@ -159,11 +160,12 @@ agent_client() {
 agent_client claude-code-work "Claude Code (work)" work
 agent_client claude-code-private "Claude Code (private)" private
 agent_client claude-code "Claude Code (work and private)" work private
+agent_client claude-code-meta "Claude Code (meta)" meta
 
 # The web UI: only members of the owner group may log in.
 if [[ "$(api GET /groups)" != 200 ]]; then
   cat >&2 <<HINT
-The clients for agents (claude-code-work, claude-code-private, claude-code) are ready, but the web UI needs more rights for the
+The clients for agents (claude-code-work, claude-code-private, claude-code, claude-code-meta) are ready, but the web UI needs more rights for the
 bootstrap API key than this Rauthy instance gave it (it was set up by an older version of this
 script, and Rauthy reads bootstrap files only on its very first start). Either
   - start over:  docker compose -f dev/compose.yaml down -v && rm -r dev/rauthy
@@ -235,7 +237,8 @@ Rauthy is ready at $RAUTHY_URL (admin UI: $RAUTHY_URL/auth/v1/admin)
   admin login:  $ADMIN_EMAIL / $ADMIN_PASSWORD   (also in dev/$SECRETS)
   issuer:       $RAUTHY_URL/auth/v1/
   connections:  claude-code-work (sphere work), claude-code-private (sphere private),
-                claude-code (both; must name a sphere when creating); public clients with PKCE
+                claude-code (both; must name a sphere when creating), claude-code-meta
+                (sphere meta, which the others only read); public clients with PKCE
   web client:   mnemograph-web (confidential, PKCE)
   owner group:  $OWNER_GROUP (contains $ADMIN_EMAIL)
 

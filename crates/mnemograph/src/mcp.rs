@@ -57,7 +57,10 @@ own privacy boundary, such as work or private. This connection sees and changes 
 notes of its spheres; other pages do not exist for it, and links to them are stubs. New pages and \
 notes get this connection's sphere; if it has several, name one with the sphere parameter. To \
 share a page with another of this connection's spheres, or to move it, set its spheres with \
-write_page; spheres this connection cannot see are kept. Keep content in the sphere it belongs to.";
+write_page; spheres this connection cannot see are kept. Keep content in the sphere it belongs to. \
+Shared spheres, if any, hold what concerns every sphere, such as the owner's conventions: every \
+connection reads them, only their own connections change them, and nothing specific to another \
+sphere belongs in them. A note in this connection's sphere may link to a shared page.";
 
 /// How many recent notes read_page returns.
 const RECENT_NOTES: u32 = 10;
@@ -504,14 +507,22 @@ impl McpServer {
     /// name no spheres and give no usage page hint, so nothing is revealed across spheres.
     fn instructions(&self, caller: Option<&Identity>) -> String {
         let (connection, hint) = match caller {
-            Some(caller) => (
-                format!(
+            Some(caller) => {
+                let writer = Writer::new(caller.author.clone(), caller.spheres.clone())
+                    .with_shared(&caller.shared);
+                let mut connection = format!(
                     "This connection's spheres: {}. It sees and changes only pages and notes in \
-                     them.\n\n",
+                     them",
                     caller.spheres.names().join(", ")
-                ),
-                self.usage_hint(Visibility::Within(&caller.spheres)),
-            ),
+                );
+                if !caller.shared.is_empty() {
+                    connection += &format!(
+                        ", and reads the shared spheres {} without changing them",
+                        caller.shared.join(", ")
+                    );
+                }
+                (connection + ".\n\n", self.usage_hint(writer.visibility()))
+            }
             None => (String::new(), String::new()),
         };
         format!(
@@ -600,10 +611,10 @@ fn log_access(knowledge: &Knowledge, caller: &Writer, access: Access, target: &s
 /// never record a wrong author or cross a sphere boundary.
 fn caller(request: &http::request::Parts) -> Result<Writer, String> {
     match request.extensions.get::<Identity>() {
-        Some(identity) => Ok(Writer {
-            author: identity.author.clone(),
-            spheres: identity.spheres.clone(),
-        }),
+        Some(identity) => Ok(
+            Writer::new(identity.author.clone(), identity.spheres.clone())
+                .with_shared(&identity.shared),
+        ),
         None => {
             tracing::error!("request without identity reached a tool");
             Err("internal error".to_owned())
