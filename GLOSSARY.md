@@ -44,6 +44,10 @@ _Avoid_: Creator, editor, source
 An area of the owner's life with its own privacy boundary, such as work, private or a club; every page and note belongs to one or more.
 _Avoid_: Domain, space, tenant, category
 
+**Shared sphere**:
+A sphere that every connection reads but only connections having it as their own change, for what concerns all spheres, such as the owner's conventions (ADR 0009). The owner's is named `meta`.
+_Avoid_: Public sphere, common sphere, global sphere
+
 **Citation**:
 A reference from a page or note to an item kept by another service of the owner's assistant (a document, an appointment), made by that item's address.
 _Avoid_: Link (a link points to a page), attachment, source

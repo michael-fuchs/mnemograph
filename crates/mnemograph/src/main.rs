@@ -267,6 +267,7 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
     } = args;
     let config = SphereConfig::load(&spheres)?;
     let forbidden = config.forbidden();
+    let shared = config.shared();
     let Some(spheres) = config.allowed() else {
         bail!(
             "every configured sphere's rule keeps its content out of the wiki (wiki = \"never\"): {}",
@@ -281,7 +282,7 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
             spheres.names().join(", ")
         );
     }
-    tracing::info!(spheres = ?spheres.names(), ?forbidden, "spheres configured");
+    tracing::info!(spheres = ?spheres.names(), ?forbidden, ?shared, "spheres configured");
     let public_url = reqwest::Url::parse(&public_url)
         .with_context(|| format!("invalid public URL {public_url:?}"))?;
     let public_base = public_url.as_str().trim_end_matches('/').to_owned();
@@ -298,6 +299,7 @@ async fn serve(args: ServeArgs, default_sphere: Option<&str>) -> anyhow::Result<
                     .collect(),
                 spheres: spheres.clone(),
                 forbidden_spheres: forbidden.clone(),
+                shared_spheres: shared,
             };
             let authenticator = Authenticator::discover(settings)
                 .await

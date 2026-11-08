@@ -138,6 +138,7 @@ impl Ui {
                 required_scopes: vec!["mnemograph".into()],
                 spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
                 forbidden_spheres: vec![],
+                shared_spheres: vec![],
             })
             .await
             .unwrap(),
@@ -150,10 +151,10 @@ impl Ui {
                 "A language. See [[Ferris]].\n\n<script>alert(1)</script>",
                 None,
                 PageChanges::default(),
-                &mnemograph_core::Writer {
-                    author: Author::Agent("claude-code".into()),
-                    spheres: mnemograph_core::Spheres::new(["work"]).unwrap(),
-                },
+                &mnemograph_core::Writer::new(
+                    Author::Agent("claude-code".into()),
+                    mnemograph_core::Spheres::new(["work"]).unwrap(),
+                ),
             )
             .unwrap();
         let shutdown = CancellationToken::new();
